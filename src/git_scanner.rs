@@ -3,7 +3,6 @@ use crate::{
     error::RedflagError,
     scanner::{CommitMetadata, ContentLine, FindingHandler, ScanStats, Scanner, SuppressionState},
 };
-use bstr::ByteSlice;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
 use std::path::Path;
@@ -120,7 +119,7 @@ fn process_commit<H: FindingHandler>(
                 if !matches!(line.origin(), '+' | ' ') {
                     continue;
                 }
-                let content = line.content().to_str_lossy();
+                let content = String::from_utf8_lossy(line.content());
                 let content = content.trim_end_matches(['\r', '\n']);
                 stats.findings += scanner.scan_line_with_handler(
                     ContentLine {

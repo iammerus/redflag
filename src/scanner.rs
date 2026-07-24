@@ -3,17 +3,18 @@ use crate::{
     error::RedflagError,
 };
 use glob::Pattern;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
     fs,
     ops::Range,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 use walkdir::WalkDir;
 
 const IGNORE_COMMENT_PATTERN: &str = r"(?i)//\s*redflag-ignore(?:-next)?(?:\s+.*)?$";
-static IGNORE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(IGNORE_COMMENT_PATTERN).unwrap());
+static IGNORE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(IGNORE_COMMENT_PATTERN).unwrap());
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct Finding {

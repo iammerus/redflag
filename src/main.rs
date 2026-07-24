@@ -57,8 +57,6 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-
     match run(Cli::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

@@ -1,11 +1,11 @@
 use crate::error::RedflagError;
 use chrono::NaiveDate;
 use glob::Pattern;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
@@ -92,7 +92,7 @@ impl Default for EntropyConfig {
     }
 }
 
-static DEFAULT_PATTERNS: Lazy<Vec<SecretPattern>> = Lazy::new(|| {
+static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
     vec![
         SecretPattern {
             name: "AWS Access Key".to_string(),
