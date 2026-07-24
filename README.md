@@ -80,15 +80,8 @@ redflag scan . \
 
 Historical findings include the commit hash, author, and date.
 
-### Install a pre-commit hook
-
-Run this from the root of a Git repository:
-
-```bash
-redflag install-hook
-```
-
-The installed hook runs Redflag against staged files before Git creates the commit. The `redflag` binary must remain available on your `PATH` for the hook to work.
+The former `install-hook` command has been removed. Its hook was not executable
+and scanned working-tree files rather than staged blobs.
 
 ### Generate a configuration
 
@@ -197,7 +190,6 @@ You can add more extensions with the `extensions` field in `redflag.toml`.
 - A clean scan is not a security guarantee.
 - Finding a committed secret does not make it safe again. Revoke or rotate the credential first.
 - Redflag reports where a historical secret appears, but it does not rewrite Git history.
-- Git hooks are local and can be skipped. Run Redflag in CI or on a schedule as a second check.
 
 ## Development
 

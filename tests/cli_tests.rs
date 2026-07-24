@@ -83,6 +83,13 @@ fn missing_target_is_an_error() {
 }
 
 #[test]
+fn install_hook_is_not_available() {
+    let output = redflag_with_args(&["install-hook"]);
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn clean_directory_exits_successfully() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();

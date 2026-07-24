@@ -49,8 +49,6 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         git_branches: Option<Vec<String>>,
     },
-    /// Install git pre-commit hook
-    InstallHook,
     /// Generate default configuration file
     GenerateConfig {
         #[arg(default_value = "redflag.toml")]
@@ -95,10 +93,6 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
                 until_date: git_until,
             },
         ),
-        Commands::InstallHook => {
-            install_hook()?;
-            Ok(0)
-        }
         Commands::GenerateConfig { path } => {
             generate_default_config(&path)?;
             Ok(0)
@@ -160,21 +154,6 @@ struct GitScanOptions {
     branches: Option<Vec<String>>,
     since_date: Option<String>,
     until_date: Option<String>,
-}
-
-fn install_hook() -> Result<(), RedflagError> {
-    const HOOK_CONTENT: &str = r#"#!/bin/sh
-# Redflag pre-commit hook
-staged_files=$(git diff --cached --name-only --diff-filter=d)
-echo "Scanning for secrets..."
-redflag scan $staged_files
-exit $?
-"#;
-
-    let hook_path = PathBuf::from(".git/hooks/pre-commit");
-    std::fs::write(hook_path, HOOK_CONTENT)?;
-    println!("Pre-commit hook installed successfully");
-    Ok(())
 }
 
 fn generate_default_config(path: &PathBuf) -> Result<(), RedflagError> {
