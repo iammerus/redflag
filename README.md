@@ -49,15 +49,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: iammerus/redflag@main
+      - uses: iammerus/redflag@v0.1.0
         with:
           git-history: "true"
 ```
 
 The action accepts optional `path` and `config` inputs. It builds the selected
 Redflag revision with stable Rust, redacts secrets by default, and fails when
-findings are present. Use a release tag instead of `main` once a release
-containing the action is available.
+findings are present.
 
 ## Process contract
 
