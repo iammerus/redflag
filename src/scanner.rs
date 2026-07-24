@@ -48,7 +48,7 @@ struct ExclusionRule {
 }
 
 pub trait FindingHandler {
-    fn handle(&mut self, finding: Finding);
+    fn handle(&mut self, finding: Finding) -> Result<(), RedflagError>;
 }
 
 impl Scanner {
@@ -95,9 +95,6 @@ impl Scanner {
     }
 
     pub fn scan_directory(&self, path: &str) -> Result<Vec<Finding>, RedflagError> {
-        // Print all extensions we're looking for
-        println!("Extensions to scan: {:?}", self.extensions);
-
         let path = Path::new(path);
         let metadata = fs::metadata(path).map_err(|source| RedflagError::PathIo {
             path: path.to_path_buf(),
@@ -105,7 +102,6 @@ impl Scanner {
         })?;
 
         if metadata.is_file() {
-            println!("Scanning single file: {}", path.display());
             let policy = self.get_file_policy(path);
             return if policy == ExclusionPolicy::Ignore {
                 Ok(Vec::new())
@@ -136,8 +132,6 @@ impl Scanner {
 
         // Create a progress bar with the accurate count of files to scan
         let total_files = files_to_scan.len();
-        println!("Total files to scan: {}", total_files);
-
         let progress_bar = ProgressBar::new(total_files as u64);
         progress_bar.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({eta})")
@@ -316,7 +310,7 @@ impl Scanner {
     ) -> Result<(), RedflagError> {
         let findings = self.scan_directory(path)?;
         for finding in findings {
-            handler.handle(finding);
+            handler.handle(finding)?;
         }
         Ok(())
     }

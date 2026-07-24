@@ -26,6 +26,9 @@ pub enum RedflagError {
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
 
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("Git error: {0}")]
     Git(#[from] git2::Error),
 

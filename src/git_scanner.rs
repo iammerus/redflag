@@ -158,7 +158,7 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
 
     // Now handle all findings
     for finding in all_findings {
-        handler.handle(finding);
+        handler.handle(finding)?;
     }
 
     progress.finish_with_message("Git history scan complete");
@@ -351,8 +351,9 @@ mod tests {
     }
 
     impl FindingHandler for TestHandler {
-        fn handle(&mut self, finding: Finding) {
+        fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
             self.findings.push(finding);
+            Ok(())
         }
     }
 

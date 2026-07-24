@@ -1,13 +1,17 @@
 use std::{
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 use tempfile::tempdir;
 
 fn redflag(path: &Path) -> Output {
+    redflag_with_args(&["scan", path.to_str().unwrap()])
+}
+
+fn redflag_with_args(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_redflag"))
-        .args(["scan", path.to_str().unwrap()])
+        .args(args)
         .output()
         .unwrap()
 }
@@ -34,6 +38,48 @@ fn clean_directory_exits_successfully() {
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
 
     assert_eq!(redflag(dir.path()).status.code(), Some(0));
+}
+
+#[test]
+fn clean_json_is_valid() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", "json"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn finding_json_is_valid() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join(".env"));
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", "json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!json.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn closed_output_pipe_is_an_error() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join(".env"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .args(["scan", dir.path().to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Broken pipe"));
 }
 
 #[test]
