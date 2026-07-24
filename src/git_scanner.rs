@@ -2,7 +2,7 @@ use crate::error::RedflagError;
 use crate::scanner::calculate_shannon_entropy;
 use crate::scanner::FindingHandler;
 use crate::{
-    config::{Config, EntropyConfig, GitConfig, SecretPattern, Severity},
+    config::{Config, Severity},
     scanner::Finding,
 };
 use bstr::ByteSlice;
@@ -332,6 +332,7 @@ fn should_process_commit(commit: &Commit, since: Option<i64>, until: Option<i64>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{EntropyConfig, GitConfig, SecretPattern};
     use git2::{Repository, Signature};
     use std::fs::{self, File};
     use std::io::Write;

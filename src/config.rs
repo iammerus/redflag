@@ -329,10 +329,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/.bundle/**".to_string(), // Ruby bundle
             policy: ExclusionPolicy::Ignore,
         },
-        ExclusionRule {
-            pattern: "**/packages/**".to_string(), // Common packages folder
-            policy: ExclusionPolicy::Ignore,
-        },
         // Package lock files
         ExclusionRule {
             pattern: "**/package-lock.json".to_string(), // npm
@@ -391,19 +387,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/.nuxt/**".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
-        // Locale directories
-        ExclusionRule {
-            pattern: "**/locale/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/locales/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/i18n/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
         // Other common directories to ignore
         ExclusionRule {
             pattern: "**/.idea/**".to_string(),
@@ -427,10 +410,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
         },
         ExclusionRule {
             pattern: "**/.cache/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/logs/**".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
         ExclusionRule {

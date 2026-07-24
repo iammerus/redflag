@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use env_logger;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -54,10 +55,19 @@ enum Commands {
     },
 }
 
-fn main() -> Result<(), RedflagError> {
+fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let cli = Cli::parse();
+    match run(Cli::parse()) {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<u8, RedflagError> {
     match cli.command {
         Commands::Scan {
             path,
@@ -80,8 +90,14 @@ fn main() -> Result<(), RedflagError> {
                 until_date: git_until,
             },
         ),
-        Commands::InstallHook => install_hook(),
-        Commands::GenerateConfig { path } => generate_default_config(&path),
+        Commands::InstallHook => {
+            install_hook()?;
+            Ok(0)
+        }
+        Commands::GenerateConfig { path } => {
+            generate_default_config(&path)?;
+            Ok(0)
+        }
     }
 }
 
@@ -91,7 +107,7 @@ fn run_scan(
     format: output::OutputFormat,
     git_history: bool,
     git_options: GitScanOptions,
-) -> Result<(), RedflagError> {
+) -> Result<u8, RedflagError> {
     let mut config = Config::load(config_path)?;
 
     // Override git config with CLI options if provided
@@ -121,7 +137,7 @@ fn run_scan(
     }
 
     handler.finish()?;
-    Ok(())
+    Ok(u8::from(handler.findings_count() > 0))
 }
 
 struct GitScanOptions {

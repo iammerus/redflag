@@ -1,10 +1,24 @@
 use indicatif::style::TemplateError;
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RedflagError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Failed to access {path}: {source}")]
+    PathIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Invalid scan target: {0}")]
+    InvalidTarget(PathBuf),
+
+    #[error("Directory traversal error: {0}")]
+    WalkDir(#[from] walkdir::Error),
 
     #[error("Configuration error: {0}")]
     Config(String),

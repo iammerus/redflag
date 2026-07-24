@@ -1,10 +1,8 @@
 use crate::{
-    config::{Config, EntropyConfig, ExclusionPolicy, SecretPattern, Severity},
+    config::{Config, EntropyConfig, ExclusionPolicy, Severity},
     error::RedflagError,
 };
 use glob::Pattern;
-use ignore::overrides::OverrideBuilder;
-use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
@@ -96,58 +94,45 @@ impl Scanner {
         }
     }
 
-    pub fn scan_directory(&self, path: &str) -> Vec<Finding> {
+    pub fn scan_directory(&self, path: &str) -> Result<Vec<Finding>, RedflagError> {
         // Print all extensions we're looking for
         println!("Extensions to scan: {:?}", self.extensions);
 
         let path = Path::new(path);
-        if !path.is_dir() {
-            if path.is_file() {
-                println!("Scanning single file: {}", path.display());
-                if let Some(file_findings) = self.scan_file(path, ExclusionPolicy::ScanButAllow) {
-                    return file_findings;
-                }
-            }
-            return Vec::new();
+        let metadata = fs::metadata(path).map_err(|source| RedflagError::PathIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        if metadata.is_file() {
+            println!("Scanning single file: {}", path.display());
+            let policy = self.get_file_policy(path);
+            return if policy == ExclusionPolicy::Ignore {
+                Ok(Vec::new())
+            } else {
+                self.scan_file(path, policy)
+            };
+        }
+
+        if !metadata.is_dir() {
+            return Err(RedflagError::InvalidTarget(path.to_path_buf()));
         }
 
         // First, collect all files to scan, properly filtering out excluded files
-        let files_to_scan: Vec<PathBuf> = WalkDir::new(path)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                let path = entry.path();
-
-                // Skip directories but check exclusions for traversal
-                if path.is_dir() {
-                    // We're only collecting files, so return false for directories
-                    return false;
-                }
-
-                // Check if file should be excluded based on path
-                let path_str = path.to_string_lossy();
-                let should_exclude = self
-                    .exclusions
-                    .iter()
-                    .filter(|rule| rule.policy == ExclusionPolicy::Ignore)
-                    .any(|rule| rule.pattern.matches(&path_str));
-
-                if should_exclude {
-                    return false;
-                }
-
-                // Check if file should be scanned based on extension
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        let ext_str = ext.to_string_lossy().to_lowercase();
-                        return self.extensions.iter().any(|e| e.to_lowercase() == ext_str);
-                    }
-                }
-
-                false
-            })
-            .map(|entry| entry.path().to_path_buf())
-            .collect();
+        let mut files_to_scan = Vec::new();
+        for entry in WalkDir::new(path).into_iter().filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || entry.path() == path
+                || self.get_file_policy(entry.path()) != ExclusionPolicy::Ignore
+        }) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && self.get_file_policy(entry.path()) != ExclusionPolicy::Ignore
+                && self.should_scan_directory_file(entry.path())
+            {
+                files_to_scan.push(entry.into_path());
+            }
+        }
 
         // Create a progress bar with the accurate count of files to scan
         let total_files = files_to_scan.len();
@@ -163,28 +148,29 @@ impl Scanner {
         let findings = Arc::new(Mutex::new(Vec::new()));
 
         // Process files in parallel
-        files_to_scan.par_iter().for_each(|file_path| {
-            // Get the policy for this file
-            let policy = self.get_file_policy(file_path);
+        files_to_scan
+            .par_iter()
+            .try_for_each(|file_path| -> Result<(), RedflagError> {
+                // Get the policy for this file
+                let policy = self.get_file_policy(file_path);
 
-            // Scan the file
-            if let Some(file_findings) = self.scan_file(file_path, policy) {
-                // Add findings to the shared container
+                // Scan the file
+                let file_findings = self.scan_file(file_path, policy)?;
                 if !file_findings.is_empty() {
                     let mut findings_lock = findings.lock().unwrap();
                     findings_lock.extend(file_findings);
                 }
-            }
 
-            // Update progress
-            progress_bar.inc(1);
-        });
+                // Update progress
+                progress_bar.inc(1);
+                Ok(())
+            })?;
 
         progress_bar.finish_with_message("Scan complete");
 
         // Return the findings
         let result = findings.lock().unwrap().clone();
-        result
+        Ok(result)
     }
 
     fn get_file_policy(&self, path: &Path) -> ExclusionPolicy {
@@ -192,26 +178,35 @@ impl Scanner {
         self.exclusions
             .iter()
             .rev()
-            .find(|r| r.pattern.matches(&path_str))
-            .map(|r| r.policy.clone())
-            .unwrap_or(ExclusionPolicy::ScanButAllow) // Changed from Ignore to ScanButAllow
+            .find(|r| {
+                r.pattern.matches(&path_str)
+                    || (path.is_dir() && r.pattern.matches(&format!("{path_str}/")))
+            })
+            .map(|r| r.policy)
+            .unwrap_or(ExclusionPolicy::ScanButAllow)
     }
 
-    fn should_scan_file(&self, path: &Path) -> bool {
+    fn should_scan_directory_file(&self, path: &Path) -> bool {
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        if file_name == Some(".env") || file_name.is_some_and(|name| name.starts_with(".env.")) {
+            return true;
+        }
+
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| self.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
             .unwrap_or(false)
     }
 
-    fn scan_file(&self, path: &Path, policy: ExclusionPolicy) -> Option<Vec<Finding>> {
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to read file {}: {}", path.display(), e);
-                return None;
-            }
-        };
+    fn scan_file(
+        &self,
+        path: &Path,
+        policy: ExclusionPolicy,
+    ) -> Result<Vec<Finding>, RedflagError> {
+        let content = fs::read_to_string(path).map_err(|source| RedflagError::PathIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         let mut findings = Vec::new();
         let mut ignore_next_line = false;
@@ -227,11 +222,6 @@ impl Scanner {
 
             if ignore_next_line {
                 ignore_next_line = false;
-                continue;
-            }
-
-            // Skip if line appears to be in a test file or test function
-            if self.is_test_context(path, line) {
                 continue;
             }
 
@@ -288,52 +278,13 @@ impl Scanner {
         match policy {
             ExclusionPolicy::ScanButWarn => {
                 for finding in &findings {
-                    println!("WARNING: Potential secret found but allowed: {:?}", finding);
+                    eprintln!("WARNING: Potential secret found but allowed: {:?}", finding);
                 }
-                None
+                Ok(Vec::new())
             }
-            ExclusionPolicy::ScanButAllow => {
-                if findings.is_empty() {
-                    None
-                } else {
-                    Some(findings)
-                }
-            }
-            _ => {
-                if findings.is_empty() {
-                    None
-                } else {
-                    Some(findings)
-                }
-            }
+            ExclusionPolicy::ScanButAllow => Ok(findings),
+            ExclusionPolicy::Ignore => Ok(Vec::new()),
         }
-    }
-
-    fn is_test_context(&self, path: &Path, line: &str) -> bool {
-        // Check if file is a test file
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-        if file_name.contains("test") || file_name.contains("spec") {
-            return true;
-        }
-
-        // Check for common test patterns in the line
-        let test_patterns = [
-            r"#\[test\]",
-            r"describe\s*\(",
-            r"it\s*\(",
-            r"test\s*\(",
-            r"assert",
-            r"expect\s*\(",
-            r"mock\s*\(",
-            r"fixture",
-        ];
-
-        test_patterns.iter().any(|pattern| {
-            Regex::new(pattern)
-                .map(|re| re.is_match(line))
-                .unwrap_or(false)
-        })
     }
 
     fn create_finding(
@@ -363,7 +314,7 @@ impl Scanner {
         path: &str,
         handler: &mut H,
     ) -> Result<(), RedflagError> {
-        let findings = self.scan_directory(path);
+        let findings = self.scan_directory(path)?;
         for finding in findings {
             handler.handle(finding);
         }
@@ -1029,6 +980,7 @@ pub(crate) fn calculate_shannon_entropy(s: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SecretPattern;
 
     #[test]
     fn test_regex_pattern() {
@@ -1085,7 +1037,9 @@ mod tests {
         };
 
         let scanner = Scanner::with_config(config);
-        let findings = scanner.scan_directory(dir.path().to_str().unwrap());
+        let findings = scanner
+            .scan_directory(dir.path().to_str().unwrap())
+            .unwrap();
 
         assert!(!findings.is_empty(), "No findings detected");
         Ok(())

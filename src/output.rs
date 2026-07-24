@@ -127,14 +127,11 @@ impl OutputHandler {
         }
 
         self.writer.flush()?;
-
-        #[cfg(not(test))]
-        {
-            if self.findings_count > 0 {
-                std::process::exit(1);
-            }
-        }
         Ok(())
+    }
+
+    pub fn findings_count(&self) -> usize {
+        self.findings_count
     }
 
     #[cfg(test)]
