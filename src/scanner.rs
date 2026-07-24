@@ -65,8 +65,16 @@ pub(crate) struct Detection<'a> {
     pub severity: Severity,
 }
 
+pub(crate) struct ContentLine<'a> {
+    pub path: &'a Path,
+    pub number: usize,
+    pub content: &'a str,
+    pub commit: Option<&'a CommitMetadata>,
+    pub emit_findings: bool,
+}
+
 #[derive(Default)]
-struct SuppressionState {
+pub(crate) struct SuppressionState {
     ignore_next_line: bool,
 }
 
@@ -210,16 +218,43 @@ impl Scanner {
         let mut state = SuppressionState::default();
         let mut findings_count = 0;
         for (line_num, line) in content.lines().enumerate() {
-            for finding in self.scan_line(path, line_num + 1, line, &mut state, commit) {
-                if policy == ExclusionPolicy::ScanButWarn {
-                    eprintln!("WARNING: Potential secret found but allowed: {finding:?}");
-                } else {
-                    handler.handle(finding)?;
-                    findings_count += 1;
-                }
-            }
+            findings_count += self.scan_line_with_handler(
+                ContentLine {
+                    path,
+                    number: line_num + 1,
+                    content: line,
+                    commit,
+                    emit_findings: true,
+                },
+                &mut state,
+                handler,
+            )?;
         }
         Ok(findings_count)
+    }
+
+    pub(crate) fn scan_line_with_handler<H: FindingHandler>(
+        &self,
+        input: ContentLine<'_>,
+        state: &mut SuppressionState,
+        handler: &mut H,
+    ) -> Result<usize, RedflagError> {
+        let policy = self.file_policy(input.path);
+        let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
+        if !input.emit_findings || policy == ExclusionPolicy::Ignore {
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        for finding in findings {
+            if policy == ExclusionPolicy::ScanButWarn {
+                eprintln!("WARNING: Potential secret found but allowed: {finding:?}");
+            } else {
+                handler.handle(finding)?;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     fn scan_line(

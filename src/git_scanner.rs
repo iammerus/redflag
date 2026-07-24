@@ -1,12 +1,18 @@
 use crate::{
     config::GitConfig,
     error::RedflagError,
-    scanner::{CommitMetadata, FindingHandler, ScanStats, Scanner},
+    scanner::{CommitMetadata, ContentLine, FindingHandler, ScanStats, Scanner, SuppressionState},
 };
 use bstr::ByteSlice;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use git2::{Commit, Delta, DiffOptions, Repository};
+use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
 use std::path::Path;
+
+pub fn validate_git_scan(path: &Path, config: &GitConfig) -> Result<(), RedflagError> {
+    let repo = Repository::open(path)?;
+    let mut revwalk = repo.revwalk()?;
+    push_revisions(&repo, &mut revwalk, config)
+}
 
 pub fn scan_git_history_with_handler<H: FindingHandler>(
     path: &Path,
@@ -16,6 +22,8 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
 ) -> Result<ScanStats, RedflagError> {
     let repo = Repository::open(path)?;
     let mut revwalk = repo.revwalk()?;
+    push_revisions(&repo, &mut revwalk, config)?;
+    revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
 
     let since_timestamp = config
         .since_date
@@ -32,35 +40,38 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
         })
         .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc).timestamp());
 
-    if config.branches.is_empty() {
-        revwalk.push_head()?;
-    } else {
-        for branch in &config.branches {
-            if let Ok(branch_ref) = repo.find_branch(branch, git2::BranchType::Local) {
-                if let Some(name) = branch_ref.get().name() {
-                    revwalk.push_ref(name)?;
-                }
-            }
-        }
-    }
-    revwalk.set_sorting(git2::Sort::TIME)?;
-
     let mut stats = ScanStats::default();
-    let mut inspected = 0;
-    for oid in revwalk {
+    for oid in revwalk.take(config.max_depth) {
         let commit = repo.find_commit(oid?)?;
         if !should_process_commit(&commit, since_timestamp, until_timestamp) {
             continue;
         }
-        if inspected == config.max_depth {
-            break;
-        }
         let commit_stats = process_commit(&repo, &commit, scanner, handler)?;
         stats.files += commit_stats.files;
         stats.findings += commit_stats.findings;
-        inspected += 1;
     }
     Ok(stats)
+}
+
+fn push_revisions<'repo>(
+    repo: &'repo Repository,
+    revwalk: &mut Revwalk<'repo>,
+    config: &GitConfig,
+) -> Result<(), RedflagError> {
+    let revisions: Vec<&str> = if config.branches.is_empty() {
+        vec!["HEAD"]
+    } else {
+        config.branches.iter().map(String::as_str).collect()
+    };
+    for revision in revisions {
+        let object = repo.revparse_single(revision).map_err(|error| {
+            RedflagError::Config(format!(
+                "Git revision '{revision}' cannot be resolved: {error}"
+            ))
+        })?;
+        revwalk.push(object.id())?;
+    }
+    Ok(())
 }
 
 fn process_commit<H: FindingHandler>(
@@ -86,22 +97,44 @@ fn process_commit<H: FindingHandler>(
     };
 
     let mut stats = ScanStats::default();
-    for delta in diff.deltas() {
-        if delta.status() == Delta::Deleted {
+    for delta_index in 0..diff.deltas().len() {
+        let Some(delta) = diff.get_delta(delta_index) else {
             continue;
-        }
+        };
         let Some(path) = delta.new_file().path() else {
             continue;
         };
         if !scanner.should_scan_path(path) {
             continue;
         }
+        let Some(patch) = Patch::from_diff(&diff, delta_index)? else {
+            continue;
+        };
 
-        let blob = repo.find_blob(delta.new_file().id())?;
-        let content = blob.content().to_str_lossy();
-        stats.findings +=
-            scanner.scan_content_with_handler(path, &content, Some(&metadata), handler)?;
         stats.files += 1;
+        for hunk_index in 0..patch.num_hunks() {
+            let (_, line_count) = patch.hunk(hunk_index)?;
+            let mut state = SuppressionState::default();
+            for line_index in 0..line_count {
+                let line = patch.line_in_hunk(hunk_index, line_index)?;
+                if !matches!(line.origin(), '+' | ' ') {
+                    continue;
+                }
+                let content = line.content().to_str_lossy();
+                let content = content.trim_end_matches(['\r', '\n']);
+                stats.findings += scanner.scan_line_with_handler(
+                    ContentLine {
+                        path,
+                        number: line.new_lineno().unwrap_or(0) as usize,
+                        content,
+                        commit: Some(&metadata),
+                        emit_findings: line.origin() == '+',
+                    },
+                    &mut state,
+                    handler,
+                )?;
+            }
+        }
     }
     Ok(stats)
 }
@@ -265,6 +298,7 @@ mod tests {
         // Check findings in reverse chronological order
         let mut findings = handler.findings;
         findings.sort_by(|a, b| b.commit_date.cmp(&a.commit_date));
+        assert_ne!(findings[0].commit_hash, findings[1].commit_hash);
 
         // Verify we found the expected types of secrets
         let mut api_key_count = 0;
@@ -425,5 +459,76 @@ mod tests {
         assert_eq!(working.description, history.description);
         assert_eq!(working.severity, history.severity);
         assert_eq!(working.snippet, history.snippet);
+    }
+
+    #[test]
+    fn unchanged_lines_are_not_attributed_to_later_commits() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        fs::write(
+            dir.path().join("secret.rs"),
+            "api_key = \"reported_value\"\n",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("secret.rs")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let introduction = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Add secret",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        drop(tree);
+
+        fs::write(dir.path().join("clean.rs"), "fn main() {}\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("clean.rs")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(introduction).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Add clean file",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+
+        let config = Config {
+            patterns: vec![SecretPattern {
+                name: "api-key".to_string(),
+                pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),
+                description: "API key detected".to_string(),
+                severity: Severity::High,
+            }],
+            extensions: vec!["rs".to_string()],
+            exclusions: Vec::new(),
+            entropy: EntropyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            git: GitConfig {
+                branches: Vec::new(),
+                ..Default::default()
+            },
+        };
+        let scanner = Scanner::with_config(config.clone()).unwrap();
+        let mut handler = TestHandler::new();
+        scan_git_history_with_handler(dir.path(), &scanner, &config.git, &mut handler).unwrap();
+
+        assert_eq!(handler.findings.len(), 1);
+        assert_eq!(
+            handler.findings[0].commit_hash.as_deref(),
+            Some(introduction.to_string().as_str())
+        );
     }
 }

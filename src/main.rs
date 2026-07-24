@@ -132,6 +132,9 @@ fn run_scan(
         }
     }
     config.validate()?;
+    if git_history {
+        git_scanner::validate_git_scan(Path::new(&path), &config.git)?;
+    }
 
     let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
     let mut handler = OutputHandler::new(format);

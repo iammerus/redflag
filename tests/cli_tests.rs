@@ -1,3 +1,4 @@
+use git2::{Repository, Signature};
 use std::{
     fs,
     path::Path,
@@ -24,6 +25,51 @@ fn write_secret(path: &Path) {
 
 fn synthetic_secret() -> String {
     ["0123456789abcdef", "FEDCBA9876543210"].concat()
+}
+
+fn trunk_repo_with_deleted_secret() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(&dir).unwrap();
+    repo.set_head("refs/heads/trunk").unwrap();
+    let signature = Signature::now("Test User", "test@example.com").unwrap();
+    let path = dir.path().join("secret.rs");
+    write_secret(&path);
+
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("secret.rs")).unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let first = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Add secret",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    drop(tree);
+
+    fs::remove_file(path).unwrap();
+    let mut index = repo.index().unwrap();
+    index.remove_path(Path::new("secret.rs")).unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let parent = repo.find_commit(first).unwrap();
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        "Remove secret",
+        &tree,
+        &[&parent],
+    )
+    .unwrap();
+    drop(parent);
+    drop(tree);
+    drop(repo);
+    dir
 }
 
 #[test]
@@ -132,6 +178,40 @@ fn invalid_config_is_an_error() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid regex"));
+}
+
+#[test]
+fn history_defaults_to_head_on_trunk() {
+    let dir = trunk_repo_with_deleted_secret();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!findings.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn missing_git_revision_is_an_error() {
+    let dir = trunk_repo_with_deleted_secret();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--git-history",
+        "--git-branches",
+        "does-not-exist",
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does-not-exist"));
 }
 
 #[test]
