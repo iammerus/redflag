@@ -77,8 +77,10 @@ explicit revision must resolve or the scan exits with code `2`.
 
 An explicitly named regular file is scanned regardless of its extension.
 Directory scans use the configured extensions and recognise `.env` and names
-such as `.env.local`. Test, example, fixture, and documentation files are not
-implicitly skipped.
+such as `.env.local`. Common extensionless configuration files including
+`.npmrc`, `.netrc`, `Dockerfile`, `Makefile`, and `Jenkinsfile` are also
+recognised. Test, example, fixture, and documentation files are not implicitly
+skipped.
 
 The former `install-hook` command has been removed. Its hook was not executable
 and read working-tree files rather than staged blobs.

@@ -456,6 +456,32 @@ fn scans_explicit_extensionless_file() {
 }
 
 #[test]
+fn scans_known_extensionless_files_in_directories() {
+    let dir = tempdir().unwrap();
+    let names = [
+        ".npmrc",
+        ".yarnrc",
+        ".netrc",
+        ".pypirc",
+        "Dockerfile",
+        "Containerfile",
+        "Makefile",
+        "Jenkinsfile",
+    ];
+    for name in names {
+        write_secret(&dir.path().join(name));
+    }
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", "json"]);
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+
+    for name in names {
+        assert!(findings
+            .iter()
+            .any(|finding| finding["file"].as_str().unwrap().ends_with(name)));
+    }
+}
+
+#[test]
 fn last_exclusion_rule_wins() {
     for (last_policy, expected) in [("ScanButAllow", 1), ("Ignore", 0)] {
         let dir = tempdir().unwrap();

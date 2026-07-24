@@ -269,7 +269,7 @@ impl Scanner {
 
     pub(crate) fn should_scan_path(&self, path: &Path) -> bool {
         let file_name = path.file_name().and_then(|name| name.to_str());
-        if is_lockfile(path) {
+        if is_lockfile(path) || is_known_extensionless_file(path) {
             return true;
         }
         if file_name == Some(".env") || file_name.is_some_and(|name| name.starts_with(".env.")) {
@@ -508,6 +508,22 @@ fn is_lockfile(path: &Path) -> bool {
                 | "go.sum"
                 | "flake.lock"
                 | "bun.lock"
+        )
+    )
+}
+
+fn is_known_extensionless_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            ".npmrc"
+                | ".yarnrc"
+                | ".netrc"
+                | ".pypirc"
+                | "Dockerfile"
+                | "Containerfile"
+                | "Makefile"
+                | "Jenkinsfile"
         )
     )
 }
