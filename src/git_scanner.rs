@@ -3,7 +3,7 @@ use crate::{
     error::RedflagError,
     scanner::{CommitMetadata, ContentLine, FindingHandler, ScanStats, Scanner, SuppressionState},
 };
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
 use std::path::Path;
 
@@ -24,25 +24,10 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
     push_revisions(&repo, &mut revwalk, config)?;
     revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
 
-    let since_timestamp = config
-        .since_date
-        .as_ref()
-        .and_then(|date| {
-            NaiveDateTime::parse_from_str(&format!("{date} 00:00:00"), "%Y-%m-%d %H:%M:%S").ok()
-        })
-        .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc).timestamp());
-    let until_timestamp = config
-        .until_date
-        .as_ref()
-        .and_then(|date| {
-            NaiveDateTime::parse_from_str(&format!("{date} 23:59:59"), "%Y-%m-%d %H:%M:%S").ok()
-        })
-        .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc).timestamp());
-
     let mut stats = ScanStats::default();
     for oid in revwalk.take(config.max_depth) {
         let commit = repo.find_commit(oid?)?;
-        if !should_process_commit(&commit, since_timestamp, until_timestamp) {
+        if !should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
             continue;
         }
         let commit_stats = process_commit(&repo, &commit, scanner, handler)?;
@@ -179,6 +164,8 @@ mod tests {
         config: &Config,
         handler: &mut TestHandler,
     ) -> Result<ScanStats, RedflagError> {
+        let mut config = config.clone();
+        config.validate()?;
         let scanner = Scanner::with_config(config.clone())?;
         scan_git_history_with_handler(path, &scanner, &config.git, handler)
     }
@@ -287,6 +274,8 @@ mod tests {
                 branches: Vec::new(),
                 since_date: None,
                 until_date: None,
+                since_timestamp: None,
+                until_timestamp: None,
             },
         };
 

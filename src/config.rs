@@ -26,6 +26,10 @@ pub struct GitConfig {
     pub since_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
+    #[serde(skip)]
+    pub(crate) since_timestamp: Option<i64>,
+    #[serde(skip)]
+    pub(crate) until_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -415,6 +419,8 @@ impl Default for GitConfig {
             branches: Vec::new(),
             since_date: None,
             until_date: None,
+            since_timestamp: None,
+            until_timestamp: None,
         }
     }
 }
@@ -463,7 +469,7 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), RedflagError> {
+    pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
         for pattern in &self.patterns {
             Regex::new(&pattern.pattern).map_err(|error| {
                 RedflagError::Config(format!("Invalid regex for '{}': {error}", pattern.name))
@@ -500,6 +506,12 @@ impl Config {
                 "git.since_date must not be after git.until_date".to_string(),
             ));
         }
+        self.git.since_timestamp = since
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|date| date.and_utc().timestamp());
+        self.git.until_timestamp = until
+            .and_then(|date| date.and_hms_opt(23, 59, 59))
+            .map(|date| date.and_utc().timestamp());
         if let Some(branch) = self.git.branches.iter().find(|branch| branch.is_empty()) {
             return Err(RedflagError::Config(format!(
                 "Git revision must not be empty: '{branch}'"
