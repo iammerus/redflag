@@ -400,6 +400,7 @@ fn extract_entropy_candidate(line: &str, min_length: usize) -> Option<Range<usiz
 
 fn is_entropy_token(value: &str, min_length: usize) -> bool {
     value.len() >= min_length
+        && !(value.contains('/') && value.contains('.'))
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'/' | b'=' | b':' | b'%')
@@ -478,11 +479,15 @@ mod tests {
 
     #[test]
     fn entropy_candidates_are_token_shaped() {
-        let token = "AbCdEf0123456789._-+/=%AbCdEfXYZ";
+        let token = "AbCdEf0123456789_-+/=%AbCdEfXYZ";
         let json = format!(r#""value": "{token}""#);
         let range = extract_entropy_candidate(&json, 30).unwrap();
 
         assert_eq!(&json[range], token);
+        assert!(is_entropy_token(
+            "eyJhbGciOiJIUzI1NiJ9.AbCdEf0123456789.signature",
+            30
+        ));
         assert!(extract_entropy_candidate(
             r#""Bash(GIT_AUTHOR_DATE=2026-01-01 git commit --amend)""#,
             30
@@ -493,6 +498,10 @@ mod tests {
             30
         )
         .is_none());
+        assert!(
+            extract_entropy_candidate(r#""platform.example.io/qualified-resource-name""#, 30)
+                .is_none()
+        );
     }
 
     #[test]
