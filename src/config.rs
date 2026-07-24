@@ -426,9 +426,9 @@ impl Config {
                 ))
             })?;
         }
-        if !self.entropy.threshold.is_finite() || self.entropy.threshold < 0.0 {
+        if !(0.0..=8.0).contains(&self.entropy.threshold) {
             return Err(RedflagError::Config(
-                "Entropy threshold must be finite and nonnegative".to_string(),
+                "Entropy threshold must be between 0.0 and 8.0".to_string(),
             ));
         }
         if self.entropy.min_length == 0 {
@@ -612,6 +612,7 @@ policy = "Ignore"
                 "[git]\nsince_date = \"2026-07-25\"\nuntil_date = \"2026-07-24\"\n",
                 "must not be after",
             ),
+            ("[entropy]\nthreshold = 9.0\n", "between 0.0 and 8.0"),
         ] {
             let error = load(contents).unwrap_err().to_string();
             assert!(error.contains(expected), "Unexpected error: {error}");
