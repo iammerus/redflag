@@ -16,8 +16,8 @@ Install from source with a current Rust toolchain:
 cargo install --git https://github.com/iammerus/redflag
 ```
 
-Release tags use the `v<version>` form. Package version `0.1.0` therefore uses
-tag `v0.1.0`. Release builds provide Linux, Windows, and macOS x86-64 binaries.
+Release tags use the `v<version>` form. Package version `0.1.1` therefore uses
+tag `v0.1.1`. Release builds provide Linux, Windows, and macOS x86-64 binaries.
 
 ## Quick start
 
@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: iammerus/redflag@v0.1.0
+      - uses: iammerus/redflag@v0.1.1
         with:
           git-history: "true"
 ```

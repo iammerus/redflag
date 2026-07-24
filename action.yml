@@ -1,4 +1,4 @@
-name: Redflag
+name: Redflag Secret Scanner by iammerus
 description: Scan a repository for secrets in files and Git history
 author: iammerus
 
