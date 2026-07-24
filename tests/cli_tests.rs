@@ -202,6 +202,42 @@ fn entropy_can_be_disabled() {
 }
 
 #[test]
+fn entropy_ignores_command_strings() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("settings.local.json"),
+        r#"{
+  "allow": [
+    "Bash(GIT_AUTHOR_DATE=2026-01-01 git commit --amend --no-edit)",
+    "A long prose permission containing spaces, punctuation, and numbers 12345"
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(redflag(dir.path()).status.code(), Some(0));
+}
+
+#[test]
+fn entropy_detects_opaque_json_value() {
+    let dir = tempdir().unwrap();
+    let token = [
+        "ABCDEFGHIJKLMNOPQRST",
+        "UVWXYZabcdefghijklmn",
+        "opqrstuvwxyz0123456789",
+    ]
+    .concat();
+    fs::write(
+        dir.path().join("session.json"),
+        format!(r#"{{"value": "{token}"}}"#),
+    )
+    .unwrap();
+
+    assert_eq!(redflag(dir.path()).status.code(), Some(1));
+}
+
+#[test]
 fn invalid_config_is_an_error() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();

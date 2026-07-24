@@ -371,29 +371,39 @@ pub(crate) fn finding_snippet(
 
 fn extract_entropy_candidate(line: &str, min_length: usize) -> Option<Range<usize>> {
     for quote in ['"', '\''] {
-        let Some(open) = line.find(quote) else {
-            continue;
-        };
-        let value_start = open + quote.len_utf8();
-        let Some(close) = line[value_start..].find(quote) else {
-            continue;
-        };
-        let range = value_start..value_start + close;
-        if range.len() >= min_length {
-            return Some(range);
+        let mut offset = 0;
+        while let Some(open) = line[offset..].find(quote).map(|index| offset + index) {
+            let value_start = open + quote.len_utf8();
+            let Some(close) = line[value_start..]
+                .find(quote)
+                .map(|index| value_start + index)
+            else {
+                break;
+            };
+            if is_entropy_token(&line[value_start..close], min_length) {
+                return Some(value_start..close);
+            }
+            offset = close + quote.len_utf8();
         }
     }
 
     let separator = line.find(['=', ':'])?;
-    let value_start = separator + 1;
-    let value = line[value_start..].trim();
+    let value = line[separator + 1..].trim();
     let value = value.trim_end_matches([',', ';']);
-    if value.len() < min_length {
+    if !is_entropy_token(value, min_length) {
         return None;
     }
 
     let start = line.find(value)?;
     Some(start..start + value.len())
+}
+
+fn is_entropy_token(value: &str, min_length: usize) -> bool {
+    value.len() >= min_length
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'/' | b'=' | b':' | b'%')
+        })
 }
 
 pub(crate) fn calculate_shannon_entropy(s: &str) -> f64 {
@@ -467,12 +477,22 @@ mod tests {
     }
 
     #[test]
-    fn entropy_candidate_tracks_quoted_value() {
-        let line = r#"token = "mR7hJ8q$Lz@w!bE5""#;
-        let range = extract_entropy_candidate(line, 16).unwrap();
+    fn entropy_candidates_are_token_shaped() {
+        let token = "AbCdEf0123456789._-+/=%AbCdEfXYZ";
+        let json = format!(r#""value": "{token}""#);
+        let range = extract_entropy_candidate(&json, 30).unwrap();
 
-        assert_eq!(&line[range], "mR7hJ8q$Lz@w!bE5");
-        assert!(extract_entropy_candidate(r#"token = "short""#, 16).is_none());
+        assert_eq!(&json[range], token);
+        assert!(extract_entropy_candidate(
+            r#""Bash(GIT_AUTHOR_DATE=2026-01-01 git commit --amend)""#,
+            30
+        )
+        .is_none());
+        assert!(extract_entropy_candidate(
+            "const prompts = [`first long source expression`, `second expression`];",
+            30
+        )
+        .is_none());
     }
 
     #[test]
