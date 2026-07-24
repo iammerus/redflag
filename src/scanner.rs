@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, EntropyConfig, ExclusionPolicy, Severity},
+    config::{is_default_pattern, Config, EntropyConfig, ExclusionPolicy, SecretPattern, Severity},
     error::RedflagError,
 };
 use glob::Pattern;
@@ -64,11 +64,67 @@ pub(crate) enum ScanProgress {
 }
 
 pub struct Scanner {
-    patterns: Vec<(Regex, String, String, Severity)>,
+    patterns: Vec<CompiledPattern>,
     entropy_config: EntropyConfig,
     extensions: Vec<String>,
     exclusions: Vec<ExclusionRule>,
     show_secrets: bool,
+}
+
+struct CompiledPattern {
+    regex: Regex,
+    rule: SecretPattern,
+    builtin: bool,
+}
+
+impl CompiledPattern {
+    fn new(rule: SecretPattern) -> Result<Self, RedflagError> {
+        Ok(Self {
+            regex: Regex::new(&rule.pattern)?,
+            builtin: is_default_pattern(&rule),
+            rule,
+        })
+    }
+
+    fn ranges(&self, line: &str, path: &Path) -> Vec<Range<usize>> {
+        self.regex
+            .captures_iter(line)
+            .filter_map(|captures| {
+                let full_match = captures.get(0)?;
+                let found = captures.name("secret").unwrap_or(full_match);
+                let mut range = found.range();
+                if self.builtin {
+                    // The colon in ${PASSWORD:-value} is a shell operator,
+                    // not an object assignment to PASSWORD.
+                    if found.start() > full_match.start()
+                        && line[..full_match.start()]
+                            .rsplit_once("${")
+                            .is_some_and(|(_, tail)| {
+                                tail.bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                            })
+                    {
+                        return None;
+                    }
+                    let mut quoted = is_quoted(found.as_str());
+                    if quoted {
+                        range = range.start + 1..range.end - 1;
+                    }
+                    if let Some(default) = shell_default_range(line, &range) {
+                        range = default;
+                        quoted = is_quoted(&line[range.clone()]);
+                        if quoted {
+                            range = range.start + 1..range.end - 1;
+                        }
+                    }
+                    if !valid_builtin(&self.rule.name, line, &range, quoted, path) {
+                        return None;
+                    }
+                }
+                Some(range)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,14 +168,7 @@ impl Scanner {
         let patterns = config
             .patterns
             .into_iter()
-            .map(|pattern| {
-                Ok((
-                    Regex::new(&pattern.pattern)?,
-                    pattern.name,
-                    pattern.description,
-                    pattern.severity,
-                ))
-            })
+            .map(CompiledPattern::new)
             .collect::<Result<Vec<_>, RedflagError>>()?;
         let exclusions = config
             .exclusions
@@ -371,13 +420,13 @@ impl Scanner {
         }
 
         let mut detections = Vec::new();
-        for (pattern, name, description, severity) in &self.patterns {
-            for secret_match in pattern.find_iter(line) {
+        for pattern in &self.patterns {
+            for range in pattern.ranges(line, path) {
                 detections.push(Detection {
-                    range: secret_match.range(),
-                    name,
-                    description,
-                    severity: *severity,
+                    range,
+                    name: &pattern.rule.name,
+                    description: &pattern.rule.description,
+                    severity: pattern.rule.severity,
                 });
             }
         }
@@ -526,6 +575,145 @@ fn is_known_extensionless_file(path: &Path) -> bool {
                 | "Jenkinsfile"
         )
     )
+}
+
+fn is_quoted(value: &str) -> bool {
+    value.len() >= 2
+        && matches!(value.as_bytes()[0], b'"' | b'\'' | b'`')
+        && value.as_bytes().first() == value.as_bytes().last()
+}
+
+fn is_reference(value: &str) -> bool {
+    static REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\{\{\s*(?:secrets|env|vars)(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*\}\}|\$[A-Za-z_][A-Za-z0-9_]*|process\.env\.[A-Za-z_][A-Za-z0-9_]*|var\.[A-Za-z_][A-Za-z0-9_]*|os\.(?:environ\[.*\]|(?:getenv|environ\.get)\([^,]*\)))$"#,
+        )
+        .unwrap()
+    });
+    REFERENCE.is_match(value)
+}
+
+fn shell_default_range(line: &str, range: &Range<usize>) -> Option<Range<usize>> {
+    static DEFAULT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|:=|-|=)(?P<default>[^{}]*)\}$").unwrap()
+    });
+    let captures = DEFAULT.captures(&line[range.clone()])?;
+    let value = captures.name("default")?;
+    Some(range.start + value.start()..range.start + value.end())
+}
+
+fn is_placeholder(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "your_password_here"
+            | "your_api_key_here"
+            | "your_secret_here"
+            | "your_token_here"
+            | "your_github_token_here"
+            | "<password>"
+            | "<api_key>"
+            | "<secret>"
+            | "<token>"
+    )
+}
+
+fn is_publishable_key(value: &str) -> bool {
+    value
+        .strip_prefix("pk_live_")
+        .or_else(|| value.strip_prefix("pk_test_"))
+        .is_some_and(|suffix| {
+            suffix.len() >= 24 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+fn token_boundary(line: &str, range: &Range<usize>) -> bool {
+    let token_character = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    !line[..range.start]
+        .chars()
+        .next_back()
+        .is_some_and(token_character)
+        && !line[range.end..]
+            .chars()
+            .next()
+            .is_some_and(token_character)
+}
+
+fn valid_builtin(name: &str, line: &str, range: &Range<usize>, quoted: bool, path: &Path) -> bool {
+    let value = &line[range.clone()];
+    if matches!(
+        name,
+        "GitHub Token" | "Stripe Secret Key" | "npm Access Token" | "AWS Access Key" | "JWT Token"
+    ) {
+        return token_boundary(line, range);
+    }
+    if name == "Private Key" {
+        return true;
+    }
+    if name == "Database Connection String" {
+        let Some((_, authority)) = value.split_once("://") else {
+            return false;
+        };
+        let Some((userinfo, _)) = authority.split_once('@') else {
+            return false;
+        };
+        let Some((_, password)) = userinfo.split_once(':') else {
+            return false;
+        };
+        return !is_reference(password) && !is_placeholder(password);
+    }
+    if is_reference(value) || is_placeholder(value) || is_publishable_key(value) {
+        return false;
+    }
+    // Unquoted program expressions are references, not string literals. Quoted
+    // passphrases and hardcoded values combined with interpolation still count.
+    if !quoted
+        && (value.contains(['(', '[', '{'])
+            || [
+                "process.env.",
+                "config.",
+                "settings.",
+                "secrets.",
+                "this.",
+                "self.",
+            ]
+            .iter()
+            .any(|prefix| value.starts_with(prefix)))
+    {
+        return false;
+    }
+    let aws_secret = || {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'+' | b'='))
+    };
+    match name {
+        "AWS Secret Key"
+        | "AWS Secret in Object"
+        | "AWS Direct Secret Assignment"
+        | "AWS Secret with Fallback" => aws_secret(),
+        "AWS Key in Object" | "AWS Direct Key Assignment" | "AWS Access Key with Fallback" => {
+            value.len() == 20
+                && (value.starts_with("AKIA") || value.starts_with("ASIA"))
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        }
+        "Generic API Key" => {
+            value.len() >= 32
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'-' | b'+' | b'/' | b'=' | b'.')
+                })
+                && value
+                    .bytes()
+                    .any(|byte| Some(&byte) != value.as_bytes().first())
+        }
+        "Netrc Password" => {
+            path.file_name().is_some_and(|file| file == ".netrc") && !value.is_empty()
+        }
+        _ => value.len() >= 8,
+    }
 }
 
 fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {

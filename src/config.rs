@@ -96,115 +96,86 @@ impl Default for EntropyConfig {
     }
 }
 
+// Capture the complete literal, including its quotes, so validation and redaction
+// never operate on a truncated prefix. Custom rules may also capture `secret`.
+const LITERAL: &str = r#"(?P<secret>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\$\{[^{}\r\n]*\}|[^\s"'`,;}\]]+)"#;
+
+fn assignment_pattern(key: &str, operator: &str) -> String {
+    format!(r#"(?i)(?:{key})["'`]?\s*(?:{operator})\s*{LITERAL}"#)
+}
+
+fn fallback_pattern(key: &str, source: &str) -> String {
+    format!(r#"(?i)(?:{key})["'`]?\s*(?::|=)\s*(?:{source})\s*(?:\|\||\?\?)\s*{LITERAL}"#)
+}
+
 static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
+    let rule = |name: &str, pattern: String, description: &str, severity| SecretPattern {
+        name: name.to_string(),
+        pattern,
+        description: description.to_string(),
+        severity,
+    };
+    let environment = r"process\.env\.[A-Za-z0-9_]+";
+    let expression = r"[^,;\r\n]+?";
     vec![
-        SecretPattern {
-            name: "AWS Access Key".to_string(),
-            pattern: r"(?i)(AWS|AMAZON)_?(ACCESS|SECRET)?_?(KEY)?_?ID\s*=?\s*[A-Z0-9]{20}".to_string(),
-            description: "AWS Access Key ID detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret Key".to_string(),
-            pattern: r"(?i)(AWS|AMAZON)_?SECRET_?(ACCESS_?)?KEY\s*=?\s*[A-Za-z0-9/+=]{40}".to_string(),
-            description: "AWS Secret Access Key detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Key in Object".to_string(),
-            pattern: r#"key\s*:\s*['""]AKIA[A-Z0-9]{16}['""]"#.to_string(),
-            description: "AWS Access Key ID in object property detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret in Object".to_string(),
-            pattern: r#"secret\s*:\s*['""][A-Za-z0-9/+=]{40}['""]"#.to_string(),
-            description: "AWS Secret Access Key in object property detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Direct Key Assignment".to_string(),
-            pattern: r#"key\s*:\s*process\.env\.AWS_ACCESS_KEY_ID\s*\|\|\s*['"]AKIA[A-Z0-9]{16}['"]"#.to_string(),
-            description: "AWS Access Key ID with direct assignment detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Direct Secret Assignment".to_string(),
-            pattern: r#"secret\s*:\s*process\.env\.AWS_SECRET_ACCESS_KEY\s*\|\|\s*['"][A-Za-z0-9/+=]{40}['"]"#.to_string(),
-            description: "AWS Secret Access Key with direct assignment detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Access Key with Fallback".to_string(),
-            pattern: r#"(?i)key\s*:\s*.*\|\|\s*['"]AKIA[A-Z0-9]{16}['"]"#.to_string(),
-            description: "AWS Access Key ID with environment fallback detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret with Fallback".to_string(),
-            pattern: r#"(?i)secret\s*:\s*.*\|\|\s*['"][A-Za-z0-9/+=]{40}['"]"#.to_string(),
-            description: "AWS Secret Access Key with environment fallback detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Password with Fallback".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*:\s*.*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password with environment fallback".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Generic Fallback Secret".to_string(),
-            pattern: r#"(?i)(secret|token|credential|api[_\-\s]*key)\s*:\s*process\.env\.[A-Za-z0-9_]+\s*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded secret with environment fallback".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "GitHub Token".to_string(),
-            pattern: r"(?i)github[_\-\s]*(pat|token|key)\s*=?\s*gh[pousr]_[a-zA-Z0-9]{36}".to_string(),
-            description: "GitHub Personal Access Token detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Generic API Key".to_string(),
-            pattern: r#"(?i)api[_\-\s]*key\s*=?\s*['""][a-zA-Z0-9]{32,}['""]"#.to_string(),
-            description: "Generic API key detected".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Private Key".to_string(),
-            pattern: r"-----BEGIN\s+(RSA|DSA|EC|OPENSSH)?\s*PRIVATE\s+KEY(\s+ENCRYPTED)?-----".to_string(),
-            description: "Private key file detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Password Assignment".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*=\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Password in Object".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*:\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password in object property".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Database Connection String".to_string(),
-            pattern: r#"(?i)(mongodb|postgresql|mysql)://[^\s<>'"""]+"#.to_string(),
-            description: "Database connection string detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "JWT Token".to_string(),
-            pattern: r"eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*".to_string(),
-            description: "JWT token detected".to_string(),
-            severity: Severity::High,
-        },
+        rule("AWS Access Key",
+            r"(?P<secret>(?:AKIA|ASIA)[A-Z0-9]{16})".to_string(),
+            "AWS Access Key ID detected", Severity::Critical),
+        rule("AWS Secret Key",
+            assignment_pattern(r"(?:AWS|AMAZON)_?SECRET_?(?:ACCESS_?)?KEY", ":=|=>|=|:"),
+            "AWS Secret Access Key detected", Severity::Critical),
+        rule("AWS Key in Object", assignment_pattern("key", ":"),
+            "AWS Access Key ID in object property detected", Severity::Critical),
+        rule("AWS Secret in Object", assignment_pattern("secret", ":"),
+            "Possible AWS Secret Access Key in object property", Severity::High),
+        rule("AWS Direct Key Assignment", fallback_pattern("key", environment),
+            "AWS Access Key ID with direct assignment detected", Severity::Critical),
+        rule("AWS Direct Secret Assignment", fallback_pattern("secret", environment),
+            "Possible AWS Secret Access Key with direct assignment", Severity::High),
+        rule("AWS Access Key with Fallback", fallback_pattern("key", expression),
+            "AWS Access Key ID with environment fallback detected", Severity::Critical),
+        rule("AWS Secret with Fallback", fallback_pattern("secret", expression),
+            "Possible AWS Secret Access Key with environment fallback", Severity::High),
+        rule("Password with Fallback", fallback_pattern("password|passwd|pwd", expression),
+            "Possible hardcoded password with environment fallback", Severity::High),
+        rule("Generic Fallback Secret", fallback_pattern(r"secret|token|credential|api[_\-\s]*key", environment),
+            "Possible hardcoded secret with environment fallback", Severity::High),
+        rule("GitHub Token",
+            r"(?P<secret>gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59})".to_string(),
+            "GitHub token detected", Severity::Critical),
+        rule("Stripe Secret Key",
+            r"(?P<secret>(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,})".to_string(),
+            "Stripe secret or restricted API key detected", Severity::Critical),
+        rule("npm Access Token", r"(?P<secret>npm_[A-Za-z0-9]{36})".to_string(),
+            "npm access token detected", Severity::Critical),
+        rule("Generic API Key", assignment_pattern(r"api[_\-\s]*key", ":=|=>|=|:"),
+            "Generic API key detected", Severity::High),
+        rule("Private Key",
+            r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----".to_string(),
+            "Private key file detected", Severity::Critical),
+        rule("Password Assignment", assignment_pattern("password|passwd|pwd", ":=|=>|="),
+            "Possible hardcoded password", Severity::High),
+        rule("Password in Object", assignment_pattern("password|passwd|pwd", ":"),
+            "Possible hardcoded password in object property", Severity::High),
+        rule("Netrc Password", format!(r"(?i)\bpassword\s+{LITERAL}"),
+            "Password in netrc credentials file", Severity::High),
+        rule("Database Connection String",
+            r#"(?i)(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql)://[^\s<>/:'"`]+:[^\s<>@'"`]+@[^\s<>'"`]+"#.to_string(),
+            "Database connection string with password detected", Severity::Critical),
+        rule("JWT Token",
+            r"(?P<secret>eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)".to_string(),
+            "JWT token detected", Severity::High),
     ]
 });
 
 fn default_patterns() -> Vec<SecretPattern> {
     DEFAULT_PATTERNS.clone()
+}
+
+pub(crate) fn is_default_pattern(pattern: &SecretPattern) -> bool {
+    DEFAULT_PATTERNS
+        .iter()
+        .any(|default| default.name == pattern.name && default.pattern == pattern.pattern)
 }
 
 fn default_extensions() -> Vec<String> {
