@@ -90,6 +90,41 @@ fn install_hook_is_not_available() {
 }
 
 #[test]
+fn version_matches_package() {
+    let output = redflag_with_args(&["--version"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("redflag {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn generates_loadable_config() {
+    let dir = tempdir().unwrap();
+    let config = dir.path().join("generated.toml");
+    let output = redflag_with_args(&["generate-config", config.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(config.is_file());
+    let source = dir.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("main.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(
+        redflag_with_args(&[
+            "scan",
+            source.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .status
+        .code(),
+        Some(0)
+    );
+}
+
+#[test]
 fn clean_directory_exits_successfully() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();

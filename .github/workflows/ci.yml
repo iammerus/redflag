@@ -16,10 +16,15 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
       - run: cargo build --release
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "redflag") | .version')"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
 
   release-linux:
     needs: test
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +39,7 @@ jobs:
 
   release-windows:
     needs: test
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +54,7 @@ jobs:
 
   release-macos:
     needs: test
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +74,7 @@ jobs:
 
   create-release:
     needs: [release-linux, release-windows, release-macos]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -89,6 +94,7 @@ jobs:
           path: artifacts
       - uses: softprops/action-gh-release@v1
         with:
+          name: ${{ github.ref_name }}
           files: |
             artifacts/redflag-linux
             artifacts/redflag-windows.exe

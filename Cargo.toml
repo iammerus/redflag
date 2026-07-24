@@ -2,10 +2,9 @@
 name = "redflag"
 version = "0.1.0"
 edition = "2021"
-authors = ["BuggyCorp <hello@buggycorp.com>"]
 description = "Lightweight secret scanner for codebases"
 license = "MIT"
-repository = "https://github.com/BuggyCorp/redflag"
+repository = "https://github.com/iammerus/redflag"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }

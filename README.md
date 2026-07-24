@@ -1,8 +1,8 @@
 # Redflag 🚩
 
-Redflag is a small, cross-platform CLI for finding secrets in source code and Git history. It combines regular-expression rules for known credential formats with Shannon entropy checks for strings that look suspicious but do not match a built-in pattern.
-
-Removing a secret in a later commit does not remove it from Git history. Redflag can scan both the files in your current checkout and the commits behind them.
+Redflag is a small, cross-platform CLI for finding secrets in source files and
+Git history. It combines regular-expression rules for known credential formats
+with heuristic Shannon entropy checks.
 
 [![CI](https://github.com/iammerus/redflag/actions/workflows/ci.yml/badge.svg)](https://github.com/iammerus/redflag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iammerus/redflag)](https://github.com/iammerus/redflag/releases/latest)
@@ -10,23 +10,14 @@ Removing a secret in a later commit does not remove it from Git history. Redflag
 
 ## Install
 
-### From source
-
-You need a current Rust toolchain and Cargo.
+Install from source with a current Rust toolchain:
 
 ```bash
 cargo install --git https://github.com/iammerus/redflag
 ```
 
-### Pre-built binaries
-
-[Release 0.0.9](https://github.com/iammerus/redflag/releases/tag/0.0.9) includes binaries for:
-
-- Linux x86_64
-- Windows x86_64
-- macOS x86_64
-
-Download the binary for your platform, place it somewhere on your `PATH`, and make it executable where required.
+Release tags use the `v<version>` form. Package version `0.1.0` therefore uses
+tag `v0.1.0`. Release builds provide Linux, Windows, and macOS x86-64 binaries.
 
 ## Quick start
 
@@ -34,21 +25,30 @@ Download the binary for your platform, place it somewhere on your `PATH`, and ma
 # Scan the current directory
 redflag scan .
 
-# Scan the current checkout and its Git history
+# Scan the current checkout and history reachable from HEAD
 redflag scan . --git-history
 
-# Create a configuration file you can edit
+# Create and use a configuration file
 redflag generate-config redflag.toml
-
-# Scan with that configuration
 redflag scan . --config redflag.toml
 ```
 
-Redflag exits with a non-zero status when it finds a possible secret or cannot complete the scan, and `0` when the scan is clean. Findings include the matched text, so treat terminal logs and JSON reports as sensitive data.
+## Process contract
 
-## Commands
+| Exit code | Meaning |
+| ---: | --- |
+| `0` | The scan completed and found nothing |
+| `1` | The scan completed and found at least one item |
+| `2` | Arguments, configuration, input, output, or Git caused an operational failure |
 
-### Scan files
+stdout contains only the selected report format. Errors, warnings, and progress
+belong on stderr. JSON output is one valid array for clean and finding-producing
+scans.
+
+Matched values are replaced with `[REDACTED]` by default. Use `--show-secrets`
+only when raw values are genuinely required, and treat that output as sensitive.
+
+## Scan command
 
 ```bash
 redflag scan [PATH]
@@ -56,55 +56,60 @@ redflag scan [PATH]
 
 `PATH` defaults to the current directory.
 
-Useful options:
-
-| Option | What it does |
+| Option | Purpose |
 | --- | --- |
-| `-c, --config <FILE>` | Load rules from a TOML configuration file |
-| `-f, --format <text\|json>` | Choose human-readable or JSON output |
-| `--git-history` | Scan Git history in addition to the current checkout |
-| `--git-branches <BRANCHES>` | Scan a comma-separated list of branches |
-| `--git-max-depth <COUNT>` | Limit the number of commits inspected |
-| `--git-since <YYYY-MM-DD>` | Ignore commits before this date |
-| `--git-until <YYYY-MM-DD>` | Ignore commits after this date |
+| `-c, --config <FILE>` | Load a TOML configuration |
+| `-f, --format <text\|json>` | Select text or JSON output |
+| `--show-secrets` | Include raw matched values |
+| `--git-history` | Also scan reachable Git history |
+| `--git-branches <REVISIONS>` | Scan comma-separated branches, tags, or revisions |
+| `--git-max-depth <COUNT>` | Limit reachable commits inspected |
+| `--git-since <YYYY-MM-DD>` | Ignore older commits |
+| `--git-until <YYYY-MM-DD>` | Ignore newer commits |
 
-For example:
+When no Git revision is configured, history scanning starts from `HEAD`. Every
+explicit revision must resolve or the scan exits with code `2`.
 
-```bash
-redflag scan . \
-  --git-history \
-  --git-branches main,develop \
-  --git-since 2025-01-01 \
-  --git-max-depth 500
-```
-
-Historical findings include the commit hash, author, and date.
+An explicitly named regular file is scanned regardless of its extension.
+Directory scans use the configured extensions and recognise `.env` and names
+such as `.env.local`. Test, example, fixture, and documentation files are not
+implicitly skipped.
 
 The former `install-hook` command has been removed. Its hook was not executable
-and scanned working-tree files rather than staged blobs.
+and read working-tree files rather than staged blobs.
 
-### Generate a configuration
+## Configuration
+
+Generate a complete starting file:
 
 ```bash
 redflag generate-config redflag.toml
 ```
 
-If no output path is supplied, Redflag writes `redflag.toml` in the current directory.
+Configuration is merged with built-in defaults as follows:
 
-## Configuration
+- a user pattern replaces a built-in pattern with the same name, otherwise it
+  is appended;
+- extensions extend the defaults and are deduplicated without regard to case;
+- exclusions extend the defaults, with exact duplicates removed;
+- a present `[entropy]` or `[git]` section replaces that section after omitted
+  fields receive documented defaults;
+- invalid regular expressions, globs, dates, date ranges, entropy values, and
+  Git limits are fatal.
 
-Redflag ships with rules for common secrets such as AWS credentials, GitHub tokens, private keys, database URLs, JWTs, and hardcoded passwords. A TOML file can adjust entropy detection, choose Git history limits, add patterns, and control exclusions.
+Example:
 
 ```toml
+extensions = ["tf", "hcl"]
+
 [entropy]
-enabled = true
-threshold = 3.8
-min_length = 24
+enabled = false
+threshold = 4.8
+min_length = 30
 
 [git]
 max_depth = 1000
-branches = ["main", "develop"]
-since_date = "2025-01-01"
+branches = []
 
 [[patterns]]
 name = "stripe-key"
@@ -113,36 +118,30 @@ description = "Stripe API key"
 severity = "Critical"
 
 [[exclusions]]
-pattern = "**/node_modules/**"
+pattern = "**/generated/**"
 policy = "Ignore"
-
-[[exclusions]]
-pattern = "**/test-fixtures/**"
-policy = "ScanButAllow"
-
-[[exclusions]]
-pattern = "docs/examples/**"
-policy = "ScanButWarn"
 ```
 
-### Exclusion policies
+Exclusion policies are:
 
 | Policy | Behaviour |
 | --- | --- |
-| `Ignore` | Skip matching files completely |
-| `ScanButWarn` | Print warnings for matching files without adding them to the final findings |
-| `ScanButAllow` | Scan matching files normally and include matches in the final findings |
+| `Ignore` | Do not scan the matching path |
+| `ScanButWarn` | Warn on stderr but do not add findings |
+| `ScanButAllow` | Report findings normally |
 
-See the [pattern guide](PATTERN_GUIDE.md) for advice on writing and testing custom rules.
+The last matching exclusion rule wins. See
+[PATTERN_GUIDE.md](PATTERN_GUIDE.md) and
+[redflag.example.toml](redflag.example.toml) for more examples.
 
 ## Output
 
-Text output is intended for local use. The secret in this example has been manually redacted:
+Default text output redacts the matched range:
 
 ```text
 [CRITICAL] config.rs:42 - AWS Access Key - AWS Access Key ID detected
-Snippet: AKIA****************
-Commit: a1b2c3d (Developer, 2025-02-24)
+Snippet: [REDACTED]
+Commit: a1b2c3d (Developer, 2025-02-24T00:00:00+00:00)
 
 Scan Summary:
 -------------
@@ -153,27 +152,11 @@ Total findings: 1
   Low:      0
 ```
 
-Use JSON when another tool needs to read the findings:
+JSON output can be redirected safely:
 
 ```bash
 redflag scan . --git-history --format json > redflag-results.json
 ```
-
-The report contains matched snippets. Do not publish it as a public CI artifact without reviewing or redacting it first.
-
-## GitHub Actions
-
-This example installs Redflag and fails the job when a scan finds something:
-
-```yaml
-- name: Install Redflag
-  run: cargo install --git https://github.com/iammerus/redflag
-
-- name: Scan repository
-  run: redflag scan . --git-history --format json > redflag-results.json
-```
-
-The report can contain the values Redflag matched. Do not print it into a public Actions log or upload it as a public artifact.
 
 ## Files scanned by default
 
@@ -182,22 +165,22 @@ The report can contain the values Redflag matched. Do not print it into a public
 | Languages | `php`, `js`, `ts`, `jsx`, `tsx`, `py`, `rb`, `java`, `go`, `rs`, `cs`, `cpp`, `c`, `h`, `hpp` |
 | Data and configuration | `xml`, `yaml`, `yml`, `json`, `config`, `conf`, `ini`, `env`, `properties`, `toml`, `sql`, `md`, `txt` |
 
-You can add more extensions with the `extensions` field in `redflag.toml`.
-
 ## Limits
 
-- Redflag uses heuristic checks. It can miss secrets and report harmless strings.
+- Entropy detection is heuristic. It can miss secrets and report harmless
+  strings.
 - A clean scan is not a security guarantee.
-- Finding a committed secret does not make it safe again. Revoke or rotate the credential first.
-- Redflag reports where a historical secret appears, but it does not rewrite Git history.
+- Finding a committed secret does not make it safe again. Revoke or rotate it
+  first.
+- Redflag reports history but does not rewrite it.
 
 ## Development
 
 ```bash
-cargo test
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
 cargo build --release
 ```
-
-Pattern contributions are welcome. Add the rule to `redflag.example.toml`, include positive and negative tests, and open a pull request with the format it is intended to catch.
 
 Redflag is available under the MIT licence.

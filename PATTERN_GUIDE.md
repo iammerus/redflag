@@ -146,7 +146,7 @@ Before submitting a pattern:
 
 1. **Uniqueness**: Ensure it doesn't duplicate existing patterns
 2. **Performance**: Test with large codebases to verify performance
-3. **False Positives**: Minimize false positives with specific matches
+3. **False Positives**: Minimise false positives with specific matches
 4. **Documentation**: Include clear description and examples
 
 ## Common Pitfalls
