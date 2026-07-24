@@ -269,6 +269,9 @@ impl Scanner {
 
     pub(crate) fn should_scan_path(&self, path: &Path) -> bool {
         let file_name = path.file_name().and_then(|name| name.to_str());
+        if is_lockfile(path) {
+            return true;
+        }
         if file_name == Some(".env") || file_name.is_some_and(|name| name.starts_with(".env.")) {
             return true;
         }
@@ -379,7 +382,7 @@ impl Scanner {
             }
         }
 
-        if self.entropy_config.enabled {
+        if self.entropy_config.enabled && !is_lockfile(path) {
             for candidate in extract_entropy_candidates(line, self.entropy_config.min_length) {
                 if calculate_shannon_entropy(&line[candidate.clone()])
                     >= self.entropy_config.threshold
@@ -489,6 +492,24 @@ fn normalised_path(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn is_lockfile(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            "package-lock.json"
+                | "yarn.lock"
+                | "pnpm-lock.yaml"
+                | "Cargo.lock"
+                | "Gemfile.lock"
+                | "poetry.lock"
+                | "composer.lock"
+                | "go.sum"
+                | "flake.lock"
+                | "bun.lock"
+        )
+    )
 }
 
 fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {

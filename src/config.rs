@@ -106,7 +106,7 @@ static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
         },
         SecretPattern {
             name: "AWS Secret Key".to_string(),
-            pattern: r"(?i)(AWS|AMAZON)_?(ACCESS|SECRET)?_?(KEY)?\s*=?\s*[A-Za-z0-9/+=]{40}".to_string(),
+            pattern: r"(?i)(AWS|AMAZON)_?SECRET_?(ACCESS_?)?KEY\s*=?\s*[A-Za-z0-9/+=]{40}".to_string(),
             description: "AWS Secret Access Key detected".to_string(),
             severity: Severity::Critical,
         },
@@ -273,14 +273,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             policy: ExclusionPolicy::Ignore,
         },
         ExclusionRule {
-            pattern: "**/.env/**".to_string(), // Python virtual env folder
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/env/**".to_string(), // Python virtual env folder
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
             pattern: "**/__pypackages__/**".to_string(), // PDM package folder
             policy: ExclusionPolicy::Ignore,
         },
@@ -308,47 +300,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/.bundle/**".to_string(), // Ruby bundle
             policy: ExclusionPolicy::Ignore,
         },
-        // Package lock files
-        ExclusionRule {
-            pattern: "**/package-lock.json".to_string(), // npm
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/yarn.lock".to_string(), // yarn
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/pnpm-lock.yaml".to_string(), // pnpm
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/Cargo.lock".to_string(), // Rust
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/Gemfile.lock".to_string(), // Ruby
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/poetry.lock".to_string(), // Python Poetry
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/composer.lock".to_string(), // PHP
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/go.sum".to_string(), // Go
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/flake.lock".to_string(), // Nix
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/bun.lockb".to_string(), // Bun
-            policy: ExclusionPolicy::Ignore,
-        },
         // Build directories
         ExclusionRule {
             pattern: "**/build/**".to_string(),
@@ -367,14 +318,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             policy: ExclusionPolicy::Ignore,
         },
         // Other common directories to ignore
-        ExclusionRule {
-            pattern: "**/.idea/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/.vscode/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
         ExclusionRule {
             pattern: "**/coverage/**".to_string(),
             policy: ExclusionPolicy::Ignore,
@@ -616,6 +559,19 @@ severity = "Low"
             regex.is_match(r#"clientSecret: process.env.CLIENT_SECRET || "development-secret""#)
         );
         assert!(!regex.is_match(r#"baseURL: process.env.BASE_URL || "http://127.0.0.1:8000""#));
+    }
+
+    #[test]
+    fn aws_secret_requires_credential_name() {
+        let pattern = default_patterns()
+            .into_iter()
+            .find(|pattern| pattern.name == "AWS Secret Key")
+            .unwrap();
+        let regex = Regex::new(&pattern.pattern).unwrap();
+        let value = ["ABCDEFGHIJKLMNOPQRST", "UVWXYZ0123456789ABCD"].concat();
+
+        assert!(regex.is_match(&format!("AWS_SECRET_ACCESS_KEY={value}")));
+        assert!(!regex.is_match(&format!(r#"integrity="sha512-aAWS{value}""#)));
     }
 
     #[test]

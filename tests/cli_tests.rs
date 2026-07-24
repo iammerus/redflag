@@ -394,6 +394,33 @@ fn scans_packages_directory() {
 }
 
 #[test]
+fn default_exclusions_keep_secret_bearing_configuration() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("env/secret.rs"));
+    write_secret(&dir.path().join(".vscode/settings.json"));
+    write_secret(&dir.path().join("package-lock.json"));
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", "json"]);
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+
+    for path in [
+        "env/secret.rs",
+        ".vscode/settings.json",
+        "package-lock.json",
+    ] {
+        assert!(findings
+            .iter()
+            .any(|finding| finding["file"].as_str().unwrap().ends_with(path)));
+    }
+    assert!(!findings.iter().any(|finding| {
+        finding["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("package-lock.json")
+            && finding["pattern_name"] == "high-entropy"
+    }));
+}
+
+#[test]
 fn scans_explicit_extensionless_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("credentials");
