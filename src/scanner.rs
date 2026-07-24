@@ -346,16 +346,27 @@ pub(crate) fn finding_snippet(
     secret_range: Range<usize>,
     show_secrets: bool,
 ) -> String {
-    let display = if show_secrets {
-        text.to_string()
+    let context_length = if show_secrets { 3 } else { 20 };
+    let prefix: String = text[..secret_range.start]
+        .chars()
+        .rev()
+        .take(context_length)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let suffix: String = text[secret_range.end..]
+        .chars()
+        .take(context_length)
+        .collect();
+    if show_secrets {
+        format!("{prefix}{}{suffix}", &text[secret_range])
+            .chars()
+            .take(50)
+            .collect()
     } else {
-        format!(
-            "{}[REDACTED]{}",
-            &text[..secret_range.start],
-            &text[secret_range.end..]
-        )
-    };
-    display.chars().take(50).collect()
+        format!("{prefix}[REDACTED]{suffix}")
+    }
 }
 
 fn extract_entropy_candidate(line: &str, min_length: usize) -> Option<Range<usize>> {
@@ -462,6 +473,15 @@ mod tests {
 
         assert_eq!(&line[range], "mR7hJ8q$Lz@w!bE5");
         assert!(extract_entropy_candidate(r#"token = "short""#, 16).is_none());
+    }
+
+    #[test]
+    fn snippets_centre_the_matched_range() {
+        let line = format!("{}{}", "context ".repeat(10), "secret-value");
+        let start = line.find("secret-value").unwrap();
+
+        assert!(finding_snippet(&line, start..line.len(), false).contains("[REDACTED]"));
+        assert!(finding_snippet(&line, start..line.len(), true).contains("secret-value"));
     }
 
     #[test]
