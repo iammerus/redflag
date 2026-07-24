@@ -1,7 +1,10 @@
 use crate::{
     config::GitConfig,
     error::RedflagError,
-    scanner::{CommitMetadata, ContentLine, FindingHandler, ScanStats, Scanner, SuppressionState},
+    scanner::{
+        CommitMetadata, ContentLine, FindingHandler, ScanProgress, ScanStats, Scanner,
+        SuppressionState,
+    },
 };
 use chrono::{DateTime, Utc};
 use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
@@ -24,16 +27,45 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
     push_revisions(&repo, &mut revwalk, config)?;
     revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
 
-    let mut stats = ScanStats::default();
+    handler.progress(ScanProgress::Preparing {
+        phase: "Git history",
+    })?;
+    let mut commits = Vec::new();
     for oid in revwalk.take(config.max_depth) {
         let commit = repo.find_commit(oid?)?;
-        if !should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
-            continue;
+        if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
+            commits.push(commit);
         }
-        let commit_stats = process_commit(&repo, &commit, scanner, handler)?;
+    }
+
+    let mut stats = ScanStats::default();
+    let total = commits.len();
+    for (index, commit) in commits.into_iter().enumerate() {
+        let current = index + 1;
+        let short_hash = commit.id().to_string()[..8].to_string();
+        let subject = commit.summary().unwrap_or("<no subject>");
+        handler.progress(ScanProgress::Item {
+            phase: "History",
+            current,
+            total,
+            detail: format!("{short_hash} {subject}"),
+        })?;
+        let commit_stats = process_commit(
+            &repo,
+            &commit,
+            scanner,
+            handler,
+            current,
+            total,
+            &short_hash,
+        )?;
         stats.files += commit_stats.files;
         stats.findings += commit_stats.findings;
     }
+    handler.progress(ScanProgress::Finished {
+        phase: "History",
+        total,
+    })?;
     Ok(stats)
 }
 
@@ -63,6 +95,9 @@ fn process_commit<H: FindingHandler>(
     commit: &Commit,
     scanner: &Scanner,
     handler: &mut H,
+    current: usize,
+    total: usize,
+    short_hash: &str,
 ) -> Result<ScanStats, RedflagError> {
     let tree = commit.tree()?;
     let parent_tree = if commit.parent_count() > 0 {
@@ -91,6 +126,12 @@ fn process_commit<H: FindingHandler>(
         if !scanner.should_scan_path(path) {
             continue;
         }
+        handler.progress(ScanProgress::Item {
+            phase: "History",
+            current,
+            total,
+            detail: format!("{short_hash} {}", path.display()),
+        })?;
         let Some(patch) = Patch::from_diff(&diff, delta_index)? else {
             continue;
         };
@@ -142,12 +183,14 @@ mod tests {
 
     struct TestHandler {
         findings: Vec<Finding>,
+        progress: Vec<ScanProgress>,
     }
 
     impl TestHandler {
         fn new() -> Self {
             Self {
                 findings: Vec::new(),
+                progress: Vec::new(),
             }
         }
     }
@@ -155,6 +198,11 @@ mod tests {
     impl FindingHandler for TestHandler {
         fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
             self.findings.push(finding);
+            Ok(())
+        }
+
+        fn progress(&mut self, progress: ScanProgress) -> Result<(), RedflagError> {
+            self.progress.push(progress);
             Ok(())
         }
     }
@@ -282,6 +330,27 @@ mod tests {
         scan(dir.path(), &config, &mut handler)?;
 
         assert_eq!(handler.findings.len(), 2, "Expected to find 2 secrets");
+        assert!(matches!(
+            handler.progress.first(),
+            Some(ScanProgress::Preparing {
+                phase: "Git history"
+            })
+        ));
+        assert!(handler.progress.iter().any(|progress| matches!(
+            progress,
+            ScanProgress::Item {
+                current: 1,
+                total: 3,
+                ..
+            }
+        )));
+        assert!(matches!(
+            handler.progress.last(),
+            Some(ScanProgress::Finished {
+                phase: "History",
+                total: 3
+            })
+        ));
 
         // Check findings in reverse chronological order
         let mut findings = handler.findings;

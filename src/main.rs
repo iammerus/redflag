@@ -34,6 +34,10 @@ enum Commands {
         #[arg(long)]
         show_secrets: bool,
 
+        /// Disable interactive progress output
+        #[arg(long)]
+        no_progress: bool,
+
         #[arg(long)]
         git_history: bool,
 
@@ -73,6 +77,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             config,
             format,
             show_secrets,
+            no_progress,
             git_history,
             git_max_depth,
             git_since,
@@ -83,6 +88,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             config,
             format,
             show_secrets,
+            no_progress,
             git_history,
             GitScanOptions {
                 max_depth: git_max_depth,
@@ -103,6 +109,7 @@ fn run_scan(
     config_path: Option<PathBuf>,
     format: output::OutputFormat,
     show_secrets: bool,
+    no_progress: bool,
     git_history: bool,
     git_options: GitScanOptions,
 ) -> Result<u8, RedflagError> {
@@ -129,18 +136,25 @@ fn run_scan(
     }
 
     let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
-    let mut handler = OutputHandler::new(format);
+    let mut handler = OutputHandler::new(format, !no_progress);
 
-    // Stream findings instead of collecting them
-    scanner.scan_with_handler(&path, &mut handler)?;
+    let working_result = scanner.scan_with_handler(&path, &mut handler);
+    if working_result.is_err() {
+        handler.clear_progress();
+    }
+    working_result?;
 
     if git_history {
-        git_scanner::scan_git_history_with_handler(
+        let history_result = git_scanner::scan_git_history_with_handler(
             Path::new(&path),
             &scanner,
             &config.git,
             &mut handler,
-        )?;
+        );
+        if history_result.is_err() {
+            handler.clear_progress();
+        }
+        history_result?;
     }
 
     handler.finish()?;

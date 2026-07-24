@@ -45,6 +45,23 @@ pub(crate) struct ScanStats {
     pub findings: usize,
 }
 
+#[derive(Debug)]
+pub(crate) enum ScanProgress {
+    Preparing {
+        phase: &'static str,
+    },
+    Item {
+        phase: &'static str,
+        current: usize,
+        total: usize,
+        detail: String,
+    },
+    Finished {
+        phase: &'static str,
+        total: usize,
+    },
+}
+
 pub struct Scanner {
     patterns: Vec<(Regex, String, String, Severity)>,
     entropy_config: EntropyConfig,
@@ -81,6 +98,10 @@ pub(crate) struct SuppressionState {
 
 pub trait FindingHandler {
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError>;
+
+    fn progress(&mut self, _progress: ScanProgress) -> Result<(), RedflagError> {
+        Ok(())
+    }
 }
 
 impl Scanner {
@@ -135,7 +156,17 @@ impl Scanner {
         })?;
 
         if metadata.is_file() {
+            handler.progress(ScanProgress::Item {
+                phase: "Working tree",
+                current: 1,
+                total: 1,
+                detail: path.display().to_string(),
+            })?;
             let findings = self.scan_file(path, handler)?;
+            handler.progress(ScanProgress::Finished {
+                phase: "Working tree",
+                total: 1,
+            })?;
             return Ok(ScanStats { files: 1, findings });
         }
 
@@ -143,6 +174,9 @@ impl Scanner {
             return Err(RedflagError::InvalidTarget(path.to_path_buf()));
         }
 
+        handler.progress(ScanProgress::Preparing {
+            phase: "working tree",
+        })?;
         let mut files_to_scan = Vec::new();
         for entry in WalkDir::new(path).into_iter().filter_entry(|entry| {
             !entry.file_type().is_dir()
@@ -160,10 +194,21 @@ impl Scanner {
         files_to_scan.sort();
 
         let mut stats = ScanStats::default();
-        for file_path in files_to_scan {
+        let total = files_to_scan.len();
+        for (index, file_path) in files_to_scan.into_iter().enumerate() {
+            handler.progress(ScanProgress::Item {
+                phase: "Working tree",
+                current: index + 1,
+                total,
+                detail: file_path.display().to_string(),
+            })?;
             stats.findings += self.scan_file(&file_path, handler)?;
             stats.files += 1;
         }
+        handler.progress(ScanProgress::Finished {
+            phase: "Working tree",
+            total,
+        })?;
         Ok(stats)
     }
 
@@ -437,11 +482,17 @@ mod tests {
     #[derive(Default)]
     struct TestHandler {
         findings: Vec<Finding>,
+        progress: Vec<ScanProgress>,
     }
 
     impl FindingHandler for TestHandler {
         fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
             self.findings.push(finding);
+            Ok(())
+        }
+
+        fn progress(&mut self, progress: ScanProgress) -> Result<(), RedflagError> {
+            self.progress.push(progress);
             Ok(())
         }
     }
@@ -541,6 +592,27 @@ mod tests {
         scanner.scan_with_handler(dir.path().to_str().unwrap(), &mut handler)?;
 
         assert!(!handler.findings.is_empty(), "No findings detected");
+        assert!(matches!(
+            handler.progress.first(),
+            Some(ScanProgress::Preparing {
+                phase: "working tree"
+            })
+        ));
+        assert!(handler.progress.iter().any(|progress| matches!(
+            progress,
+            ScanProgress::Item {
+                current: 1,
+                total: 1,
+                ..
+            }
+        )));
+        assert!(matches!(
+            handler.progress.last(),
+            Some(ScanProgress::Finished {
+                phase: "Working tree",
+                total: 1
+            })
+        ));
         Ok(())
     }
 }

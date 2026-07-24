@@ -1,12 +1,17 @@
 use crate::{
     config::Severity,
     error::RedflagError,
-    scanner::{Finding, FindingHandler},
+    scanner::{Finding, FindingHandler, ScanProgress},
 };
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
+    time::{Duration, Instant},
 };
+
+const PROGRESS_BAR_WIDTH: usize = 20;
+const PROGRESS_DETAIL_LENGTH: usize = 80;
+const PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum OutputFormat {
@@ -20,20 +25,49 @@ pub struct OutputHandler {
     first_finding: bool,
     writer: Box<dyn Write>,
     findings_by_severity: HashMap<Severity, usize>,
+    progress_writer: Box<dyn Write>,
+    progress_enabled: bool,
+    progress_line: Option<String>,
+    progress_width: usize,
+    progress_phase: Option<&'static str>,
+    last_progress_at: Option<Instant>,
 }
 
 impl OutputHandler {
-    pub fn new(format: OutputFormat) -> Self {
-        Self::with_writer(format, Box::new(io::stdout()))
+    pub fn new(format: OutputFormat, progress: bool) -> Self {
+        let stderr = io::stderr();
+        let progress_enabled = progress && stderr.is_terminal();
+        Self::with_writers(
+            format,
+            Box::new(io::stdout()),
+            Box::new(stderr),
+            progress_enabled,
+        )
     }
 
+    #[cfg(test)]
     fn with_writer(format: OutputFormat, writer: Box<dyn Write>) -> Self {
+        Self::with_writers(format, writer, Box::new(io::sink()), false)
+    }
+
+    fn with_writers(
+        format: OutputFormat,
+        writer: Box<dyn Write>,
+        progress_writer: Box<dyn Write>,
+        progress_enabled: bool,
+    ) -> Self {
         Self {
             format,
             findings_count: 0,
             first_finding: true,
             writer,
             findings_by_severity: HashMap::new(),
+            progress_writer,
+            progress_enabled,
+            progress_line: None,
+            progress_width: 0,
+            progress_phase: None,
+            last_progress_at: None,
         }
     }
 
@@ -58,7 +92,100 @@ impl OutputHandler {
         }
     }
 
+    fn format_progress(phase: &str, current: usize, total: usize, detail: &str) -> String {
+        let current = current.min(total);
+        let percentage = current
+            .saturating_mul(100)
+            .checked_div(total)
+            .unwrap_or(100);
+        let filled = current
+            .saturating_mul(PROGRESS_BAR_WIDTH)
+            .checked_div(total)
+            .unwrap_or(PROGRESS_BAR_WIDTH);
+        let bar = format!(
+            "{}{}",
+            "#".repeat(filled),
+            "-".repeat(PROGRESS_BAR_WIDTH - filled)
+        );
+        let detail = Self::sanitise_progress_detail(detail);
+        if detail.is_empty() {
+            format!("{phase} [{bar}] {current}/{total} {percentage}%")
+        } else {
+            format!("{phase} [{bar}] {current}/{total} {percentage}% {detail}")
+        }
+    }
+
+    fn sanitise_progress_detail(detail: &str) -> String {
+        let mut characters = detail.chars().map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        });
+        let shortened: String = characters.by_ref().take(PROGRESS_DETAIL_LENGTH).collect();
+        if characters.next().is_some() {
+            format!(
+                "{}...",
+                shortened
+                    .chars()
+                    .take(PROGRESS_DETAIL_LENGTH - 3)
+                    .collect::<String>()
+            )
+        } else {
+            shortened
+        }
+    }
+
+    fn draw_progress(&mut self, force: bool) {
+        if !self.progress_enabled {
+            return;
+        }
+        if !force
+            && self
+                .last_progress_at
+                .is_some_and(|last| last.elapsed() < PROGRESS_REFRESH)
+        {
+            return;
+        }
+        let Some(line) = self.progress_line.as_deref() else {
+            return;
+        };
+        let width = line.chars().count();
+        let padding = " ".repeat(self.progress_width.saturating_sub(width));
+        if write!(self.progress_writer, "\r{line}{padding}")
+            .and_then(|_| self.progress_writer.flush())
+            .is_err()
+        {
+            self.progress_enabled = false;
+            return;
+        }
+        self.progress_width = width;
+        self.last_progress_at = Some(Instant::now());
+    }
+
+    fn clear_rendered_progress(&mut self) {
+        if !self.progress_enabled || self.progress_width == 0 {
+            return;
+        }
+        let padding = " ".repeat(self.progress_width);
+        if write!(self.progress_writer, "\r{padding}\r")
+            .and_then(|_| self.progress_writer.flush())
+            .is_err()
+        {
+            self.progress_enabled = false;
+        }
+        self.progress_width = 0;
+    }
+
+    pub fn clear_progress(&mut self) {
+        self.clear_rendered_progress();
+        self.progress_line = None;
+        self.progress_phase = None;
+    }
+
     pub fn finish(&mut self) -> Result<(), RedflagError> {
+        self.clear_progress();
         match self.format {
             OutputFormat::Json if self.first_finding => writeln!(self.writer, "[]")?,
             OutputFormat::Json => writeln!(self.writer, "\n]")?,
@@ -107,6 +234,8 @@ impl OutputHandler {
 
 impl FindingHandler for OutputHandler {
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
+        let redraw_progress = self.progress_line.is_some();
+        self.clear_rendered_progress();
         match self.format {
             OutputFormat::Text => {
                 writeln!(
@@ -138,6 +267,37 @@ impl FindingHandler for OutputHandler {
             .entry(finding.severity)
             .or_insert(0) += 1;
         self.writer.flush()?;
+        if redraw_progress {
+            self.draw_progress(true);
+        }
+        Ok(())
+    }
+
+    fn progress(&mut self, progress: ScanProgress) -> Result<(), RedflagError> {
+        let phase = match &progress {
+            ScanProgress::Preparing { phase }
+            | ScanProgress::Item { phase, .. }
+            | ScanProgress::Finished { phase, .. } => *phase,
+        };
+        let force = self.progress_phase != Some(phase)
+            || matches!(
+                progress,
+                ScanProgress::Preparing { .. } | ScanProgress::Finished { .. }
+            );
+        self.progress_phase = Some(phase);
+        self.progress_line = Some(match progress {
+            ScanProgress::Preparing { phase } => format!("Preparing {phase}..."),
+            ScanProgress::Item {
+                phase,
+                current,
+                total,
+                detail,
+            } => Self::format_progress(phase, current, total, &detail),
+            ScanProgress::Finished { phase, total } => {
+                Self::format_progress(phase, total, total, "")
+            }
+        });
+        self.draw_progress(force);
         Ok(())
     }
 }
@@ -207,5 +367,64 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn progress_is_sanitised_and_redrawn_around_findings() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let mut handler = OutputHandler::with_writers(
+            OutputFormat::Text,
+            Box::new(SharedWriter(Arc::clone(&output))),
+            Box::new(SharedWriter(Arc::clone(&progress))),
+            true,
+        );
+
+        handler
+            .progress(ScanProgress::Preparing {
+                phase: "Git history",
+            })
+            .unwrap();
+        handler.last_progress_at = Some(Instant::now() - PROGRESS_REFRESH);
+        handler
+            .progress(ScanProgress::Item {
+                phase: "History",
+                current: 1,
+                total: 4,
+                detail: format!("a1b2c3d4 subject\n{}", "x".repeat(100)),
+            })
+            .unwrap();
+        handler.handle(finding(Severity::High)).unwrap();
+        handler.clear_progress();
+
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let progress = String::from_utf8(progress.lock().unwrap().clone()).unwrap();
+        let status = "History [#####---------------] 1/4 25%";
+
+        assert!(output.contains("test.rs:42"));
+        assert_eq!(progress.matches(status).count(), 2);
+        assert!(!progress.contains('\n'));
+        assert!(progress.contains("..."));
+        assert!(progress.ends_with('\r'));
+    }
+
+    #[test]
+    fn disabled_progress_writes_nothing() {
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let mut handler = OutputHandler::with_writers(
+            OutputFormat::Text,
+            Box::new(io::sink()),
+            Box::new(SharedWriter(Arc::clone(&progress))),
+            false,
+        );
+
+        handler
+            .progress(ScanProgress::Finished {
+                phase: "Working tree",
+                total: 10,
+            })
+            .unwrap();
+
+        assert!(progress.lock().unwrap().is_empty());
     }
 }

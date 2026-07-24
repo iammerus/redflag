@@ -133,6 +133,21 @@ fn clean_directory_exits_successfully() {
 }
 
 #[test]
+fn redirected_progress_is_quiet() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+    for extra in [None, Some("--no-progress")] {
+        let mut args = vec!["scan", dir.path().to_str().unwrap()];
+        args.extend(extra);
+        let output = redflag_with_args(&args);
+
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
 fn clean_json_is_valid() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
