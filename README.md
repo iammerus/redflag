@@ -33,6 +33,32 @@ redflag generate-config redflag.toml
 redflag scan . --config redflag.toml
 ```
 
+## GitHub Action
+
+Add Redflag to a workflow:
+
+```yaml
+name: Secret scan
+
+on: [push, pull_request]
+
+jobs:
+  redflag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: iammerus/redflag@main
+        with:
+          git-history: "true"
+```
+
+The action accepts optional `path` and `config` inputs. It builds the selected
+Redflag revision with stable Rust, redacts secrets by default, and fails when
+findings are present. Use a release tag instead of `main` once a release
+containing the action is available.
+
 ## Process contract
 
 | Exit code | Meaning |

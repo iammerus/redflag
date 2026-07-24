@@ -1,0 +1,58 @@
+name: Redflag
+description: Scan a repository for secrets in files and Git history
+author: iammerus
+
+inputs:
+  path:
+    description: File or directory to scan
+    required: false
+    default: .
+  config:
+    description: Path to a Redflag configuration file
+    required: false
+    default: ""
+  git-history:
+    description: Scan Git history reachable from HEAD
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build Redflag
+      shell: bash
+      run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - name: Scan
+      shell: bash
+      env:
+        REDFLAG_CONFIG: ${{ inputs.config }}
+        REDFLAG_GIT_HISTORY: ${{ inputs.git-history }}
+        REDFLAG_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+
+        binary="$GITHUB_ACTION_PATH/target/release/redflag"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          binary="${binary}.exe"
+        fi
+
+        arguments=(scan "$REDFLAG_PATH" --no-progress)
+        if [[ -n "$REDFLAG_CONFIG" ]]; then
+          arguments+=(--config "$REDFLAG_CONFIG")
+        fi
+        case "$REDFLAG_GIT_HISTORY" in
+          true) arguments+=(--git-history) ;;
+          false) ;;
+          *)
+            echo "git-history must be true or false" >&2
+            exit 2
+            ;;
+        esac
+
+        "$binary" "${arguments[@]}"
+
+branding:
+  icon: shield
+  color: red
