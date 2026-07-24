@@ -10,6 +10,7 @@ use regex::Regex;
 use std::{
     collections::HashSet,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -39,12 +40,20 @@ pub struct Scanner {
     entropy_config: EntropyConfig,
     extensions: Vec<String>,
     exclusions: Vec<ExclusionRule>,
+    show_secrets: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ExclusionRule {
     pattern: Pattern,
     policy: ExclusionPolicy,
+}
+
+pub(crate) struct Detection<'a> {
+    pub range: Range<usize>,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub severity: Severity,
 }
 
 pub trait FindingHandler {
@@ -91,7 +100,13 @@ impl Scanner {
             entropy_config: config.entropy,
             extensions: config.extensions,
             exclusions,
+            show_secrets: false,
         }
+    }
+
+    pub fn show_secrets(mut self, show_secrets: bool) -> Self {
+        self.show_secrets = show_secrets;
+        self
     }
 
     pub fn scan_directory(&self, path: &str) -> Result<Vec<Finding>, RedflagError> {
@@ -230,14 +245,17 @@ impl Scanner {
                     continue;
                 }
 
-                if pattern.is_match(line) {
+                if let Some(secret_match) = pattern.find(line) {
                     findings.push(self.create_finding(
                         path,
                         line_num + 1,
                         line,
-                        name,
-                        description,
-                        *severity,
+                        Detection {
+                            range: secret_match.range(),
+                            name,
+                            description,
+                            severity: *severity,
+                        },
                     ));
                 }
             }
@@ -256,14 +274,22 @@ impl Scanner {
                         && calculate_shannon_entropy(&potential_secret)
                             >= self.entropy_config.threshold
                     {
-                        findings.push(self.create_finding(
-                            path,
-                            line_num + 1,
-                            line,
-                            "high-entropy",
-                            "High entropy string detected",
-                            Severity::Medium,
-                        ));
+                        findings.push(
+                            self.create_finding(
+                                path,
+                                line_num + 1,
+                                line,
+                                Detection {
+                                    range: line
+                                        .find(&potential_secret)
+                                        .map(|start| start..start + potential_secret.len())
+                                        .unwrap_or(0..line.len()),
+                                    name: "high-entropy",
+                                    description: "High entropy string detected",
+                                    severity: Severity::Medium,
+                                },
+                            ),
+                        );
                     }
                 }
             }
@@ -286,17 +312,15 @@ impl Scanner {
         path: &Path,
         line: usize,
         text: &str,
-        name: &str,
-        desc: &str,
-        severity: Severity,
+        detection: Detection<'_>,
     ) -> Finding {
         Finding {
             file: path.to_path_buf(),
             line,
-            pattern_name: name.to_string(),
-            description: desc.to_string(),
-            snippet: text.chars().take(50).collect(),
-            severity,
+            pattern_name: detection.name.to_string(),
+            description: detection.description.to_string(),
+            snippet: finding_snippet(text, detection.range, self.show_secrets),
+            severity: detection.severity,
             commit_hash: None,
             commit_author: None,
             commit_date: None,
@@ -314,6 +338,23 @@ impl Scanner {
         }
         Ok(())
     }
+}
+
+pub(crate) fn finding_snippet(
+    text: &str,
+    secret_range: Range<usize>,
+    show_secrets: bool,
+) -> String {
+    let display = if show_secrets {
+        text.to_string()
+    } else {
+        format!(
+            "{}[REDACTED]{}",
+            &text[..secret_range.start],
+            &text[secret_range.end..]
+        )
+    };
+    display.chars().take(50).collect()
 }
 
 // Helper function to determine if a line should skip entropy check

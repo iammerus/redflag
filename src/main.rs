@@ -30,6 +30,10 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "text")]
         format: output::OutputFormat,
 
+        /// Include matched secret values in output
+        #[arg(long)]
+        show_secrets: bool,
+
         #[arg(long)]
         git_history: bool,
 
@@ -72,6 +76,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             path,
             config,
             format,
+            show_secrets,
             git_history,
             git_max_depth,
             git_since,
@@ -81,6 +86,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             path,
             config,
             format,
+            show_secrets,
             git_history,
             GitScanOptions {
                 max_depth: git_max_depth,
@@ -104,6 +110,7 @@ fn run_scan(
     path: String,
     config_path: Option<PathBuf>,
     format: output::OutputFormat,
+    show_secrets: bool,
     git_history: bool,
     git_options: GitScanOptions,
 ) -> Result<u8, RedflagError> {
@@ -125,14 +132,19 @@ fn run_scan(
         }
     }
 
-    let scanner = Scanner::with_config(config.clone());
+    let scanner = Scanner::with_config(config.clone()).show_secrets(show_secrets);
     let mut handler = OutputHandler::new(format);
 
     // Stream findings instead of collecting them
     scanner.scan_with_handler(&path, &mut handler)?;
 
     if git_history {
-        git_scanner::scan_git_history_with_handler(Path::new(&path), &config, &mut handler)?;
+        git_scanner::scan_git_history_with_handler(
+            Path::new(&path),
+            &config,
+            show_secrets,
+            &mut handler,
+        )?;
     }
 
     handler.finish()?;

@@ -17,9 +17,13 @@ fn redflag_with_args(args: &[&str]) -> Output {
 }
 
 fn write_secret(path: &Path) {
-    let secret = ["0123456789abcdef", "FEDCBA9876543210"].concat();
+    let secret = synthetic_secret();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, format!("api_key = \"{secret}\"\n")).unwrap();
+}
+
+fn synthetic_secret() -> String {
+    ["0123456789abcdef", "FEDCBA9876543210"].concat()
 }
 
 #[test]
@@ -62,6 +66,31 @@ fn finding_json_is_valid() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(!json.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn output_redacts_secrets_by_default() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join(".env"));
+
+    for format in ["text", "json"] {
+        let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", format]);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+
+        assert!(!stdout.contains(&synthetic_secret()));
+        assert!(stdout.contains("[REDACTED]"));
+    }
+}
+
+#[test]
+fn show_secrets_is_explicit() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join(".env"));
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--show-secrets"]);
+
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains(&synthetic_secret()));
 }
 
 #[test]

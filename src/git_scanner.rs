@@ -1,5 +1,7 @@
 use crate::error::RedflagError;
 use crate::scanner::calculate_shannon_entropy;
+use crate::scanner::finding_snippet;
+use crate::scanner::Detection;
 use crate::scanner::FindingHandler;
 use crate::{
     config::{Config, Severity},
@@ -54,6 +56,7 @@ static SCAN_CACHE: Lazy<Mutex<ScanCache>> = Lazy::new(|| Mutex::new(ScanCache::n
 pub fn scan_git_history_with_handler<H: FindingHandler>(
     path: &Path,
     config: &Config,
+    show_secrets: bool,
     handler: &mut H,
 ) -> Result<(), RedflagError> {
     let repo = Repository::open(path)?;
@@ -138,7 +141,7 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
             }
         } else {
             let mut findings = Vec::new();
-            process_commit(&repo, &commit, config, &mut findings);
+            process_commit(&repo, &commit, config, show_secrets, &mut findings);
             for finding in &findings {
                 let key = format!(
                     "{}:{}:{}",
@@ -169,6 +172,7 @@ fn process_commit(
     repo: &Repository,
     commit: &Commit,
     config: &Config,
+    show_secrets: bool,
     findings: &mut Vec<Finding>,
 ) {
     if let Ok(tree) = commit.tree() {
@@ -186,6 +190,7 @@ fn process_commit(
             Some(&tree),
             commit,
             config,
+            show_secrets,
             findings,
         );
     }
@@ -197,6 +202,7 @@ fn analyze_diff(
     new_tree: Option<&Tree>,
     commit: &Commit,
     config: &Config,
+    show_secrets: bool,
     findings: &mut Vec<Finding>,
 ) {
     let mut diff_options = DiffOptions::new();
@@ -206,7 +212,15 @@ fn analyze_diff(
                 // Only process new or modified files, skip deletions
                 if delta.status() != Delta::Deleted {
                     if let Some(new_file) = delta.new_file().path() {
-                        process_file_diff(repo, delta, commit, config, findings, new_file);
+                        process_file_diff(
+                            repo,
+                            delta,
+                            commit,
+                            config,
+                            show_secrets,
+                            findings,
+                            new_file,
+                        );
                     }
                 }
                 true
@@ -223,6 +237,7 @@ fn process_file_diff(
     delta: git2::DiffDelta<'_>,
     commit: &Commit,
     config: &Config,
+    show_secrets: bool,
     findings: &mut Vec<Finding>,
     file_path: &Path,
 ) {
@@ -240,7 +255,15 @@ fn process_file_diff(
     if let Ok(blob) = repo.find_blob(patch) {
         let content = blob.content().to_str_lossy();
         for (line_num, line) in content.lines().enumerate() {
-            check_line(line, line_num + 1, file_path, commit, config, findings);
+            check_line(
+                line,
+                line_num + 1,
+                file_path,
+                commit,
+                config,
+                show_secrets,
+                findings,
+            );
         }
     }
 }
@@ -251,20 +274,25 @@ fn check_line(
     file_path: &Path,
     commit: &Commit,
     config: &Config,
+    show_secrets: bool,
     findings: &mut Vec<Finding>,
 ) {
     // Check regex patterns
     for pattern in &config.patterns {
         if let Ok(re) = Regex::new(&pattern.pattern) {
-            if re.is_match(line) {
+            if let Some(secret_match) = re.find(line) {
                 findings.push(create_finding(
                     file_path,
                     line_num,
                     line,
-                    &pattern.name,
-                    &pattern.description,
-                    pattern.severity,
+                    Detection {
+                        range: secret_match.range(),
+                        name: &pattern.name,
+                        description: &pattern.description,
+                        severity: pattern.severity,
+                    },
                     commit,
+                    show_secrets,
                 ));
             }
         }
@@ -280,10 +308,14 @@ fn check_line(
                 file_path,
                 line_num,
                 line,
-                "high-entropy",
-                "High entropy string detected",
-                Severity::Medium,
+                Detection {
+                    range: 0..line.len(),
+                    name: "high-entropy",
+                    description: "High entropy string detected",
+                    severity: Severity::Medium,
+                },
                 commit,
+                show_secrets,
             ));
         }
     }
@@ -293,21 +325,21 @@ fn create_finding(
     file_path: &Path,
     line_num: usize,
     line: &str,
-    pattern_name: &str,
-    description: &str,
-    severity: Severity,
+    detection: Detection<'_>,
     commit: &Commit,
+    show_secrets: bool,
 ) -> Finding {
     Finding {
         file: file_path.to_path_buf(),
         line: line_num,
-        pattern_name: pattern_name.to_string(),
-        description: description.to_string(),
-        snippet: line.chars().take(50).collect(),
-        severity,
+        pattern_name: detection.name.to_string(),
+        description: detection.description.to_string(),
+        snippet: finding_snippet(line, detection.range, show_secrets),
+        severity: detection.severity,
         commit_hash: Some(commit.id().to_string()),
         commit_author: Some(commit.author().to_string()),
-        commit_date: Some(commit.time().seconds().to_string()),
+        commit_date: DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0)
+            .map(|date| date.to_rfc3339()),
     }
 }
 
@@ -464,7 +496,7 @@ mod tests {
             },
         };
 
-        scan_git_history_with_handler(dir.path(), &config, &mut handler)?;
+        scan_git_history_with_handler(dir.path(), &config, false, &mut handler)?;
 
         assert_eq!(handler.findings.len(), 2, "Expected to find 2 secrets");
 
@@ -511,7 +543,7 @@ mod tests {
             ..Config::default()
         };
 
-        scan_git_history_with_handler(dir.path(), &config, &mut handler).unwrap();
+        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
         assert_eq!(
             handler.findings.len(),
             0,
@@ -537,7 +569,7 @@ mod tests {
             ..Config::default()
         };
 
-        scan_git_history_with_handler(dir.path(), &config, &mut handler).unwrap();
+        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
         assert!(
             !handler.findings.is_empty(),
             "Should find secrets in current date range"
@@ -560,12 +592,12 @@ mod tests {
         };
 
         // First scan should populate cache
-        scan_git_history_with_handler(dir.path(), &config, &mut handler).unwrap();
+        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
         let first_count = handler.findings.len();
 
         // Second scan should use cache
         let mut handler = TestHandler::new();
-        scan_git_history_with_handler(dir.path(), &config, &mut handler).unwrap();
+        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
         let second_count = handler.findings.len();
 
         assert_eq!(
