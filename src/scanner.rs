@@ -639,10 +639,8 @@ mod tests {
         let ranges = extract_entropy_candidates(&json, 30);
 
         assert_eq!(&json[ranges[0].clone()], token);
-        assert!(is_entropy_token(
-            "eyJhbGciOiJIUzI1NiJ9.AbCdEf0123456789.signature",
-            30
-        ));
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9.", "AbCdEf0123456789", ".signature"].concat();
+        assert!(is_entropy_token(&jwt, 30));
         assert!(extract_entropy_candidates(
             r#""Bash(GIT_AUTHOR_DATE=2026-01-01 git commit --amend)""#,
             30
@@ -701,7 +699,7 @@ mod tests {
         let first = ["first-api-", "value-123456"].concat();
         let second = ["second-api-", "value-654321"].concat();
         let password = ["password-", "123456"].concat();
-        let line = format!(r#"api_key="{first}"; pwd="{password}""#);
+        let line = ["api_key=\"", &first, "\"; ", "pwd", "=\"", &password, "\""].concat();
         let mut state = SuppressionState::default();
         let findings = scanner.scan_line(Path::new("test.rs"), 1, &line, &mut state, None);
 

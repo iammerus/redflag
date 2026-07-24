@@ -554,10 +554,16 @@ severity = "Low"
             .find(|pattern| pattern.name == "Generic Fallback Secret")
             .unwrap();
         let regex = Regex::new(&pattern.pattern).unwrap();
+        let fallback = ["development-", "secret"].concat();
+        let source = [
+            "client",
+            "Secret: process.env.CLIENT_SECRET || \"",
+            &fallback,
+            "\"",
+        ]
+        .concat();
 
-        assert!(
-            regex.is_match(r#"clientSecret: process.env.CLIENT_SECRET || "development-secret""#)
-        );
+        assert!(regex.is_match(&source));
         assert!(!regex.is_match(r#"baseURL: process.env.BASE_URL || "http://127.0.0.1:8000""#));
     }
 

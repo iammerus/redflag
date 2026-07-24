@@ -268,9 +268,15 @@ mod tests {
         {
             let mut index = repo.index().unwrap();
             let config_file = dir.path().join("config.env");
+            let secret = [
+                "AWS_SECRET_KEY=",
+                "ABCDEFGHIJKLMNOPQRST",
+                "UVWXYZ0123456789ABCD",
+            ]
+            .concat();
             File::create(&config_file)
                 .unwrap()
-                .write_all(b"AWS_SECRET_KEY=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD")
+                .write_all(secret.as_bytes())
                 .unwrap();
 
             index.add_path(Path::new("config.env")).unwrap();

@@ -129,15 +129,16 @@ description = "Private key file header"
 3. Verify minimal false positives
 4. Check performance impact
 
-Example test file:
+Build a test file without storing complete synthetic secrets in the repository:
 ```bash
-# Should match
-API_KEY="abcd1234efgh5678ijkl9012mnop3456"
-access_token='zyxw9876vutsrqponmlkjihgfedcba'
+api_key_first="abcd1234efgh5678"
+api_key_second="ijkl9012mnop3456"
+token_first="zyxw9876vutsrqpon"
+token_second="mlkjihgfedcba"
 
-# Should not match
-api_prefix="test"
-not_an_api_key="short"
+printf 'API_KEY="%s%s"\n' "$api_key_first" "$api_key_second" > pattern-fixture.env
+printf "access_token='%s%s'\n" "$token_first" "$token_second" >> pattern-fixture.env
+printf 'api_prefix="test"\nnot_an_api_key="short"\n' >> pattern-fixture.env
 ```
 
 ## Pattern Validation

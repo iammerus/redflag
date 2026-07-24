@@ -191,11 +191,19 @@ fn every_same_line_secret_is_found_and_redacted() {
     let first = ["0123456789abcdef", "FEDCBA9876543210"].concat();
     let second = ["abcdef0123456789", "0123456789FEDCBA"].concat();
     let password = ["password-", "123456"].concat();
-    fs::write(
-        dir.path().join("secrets.rs"),
-        format!(r#"api_key = "{first}"; api_key = "{second}"; pwd = "{password}""#),
-    )
-    .unwrap();
+    let contents = [
+        "api_key = \"",
+        &first,
+        "\"; api_key = \"",
+        &second,
+        "\"; ",
+        "pwd",
+        " = \"",
+        &password,
+        "\"",
+    ]
+    .concat();
+    fs::write(dir.path().join("secrets.rs"), contents).unwrap();
     let config = dir.path().join("redflag.toml");
     fs::write(&config, "[entropy]\nenabled = false\n").unwrap();
     let output = redflag_with_args(&[
