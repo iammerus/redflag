@@ -327,46 +327,40 @@ impl Scanner {
             return Vec::new();
         }
 
-        let mut findings = Vec::new();
+        let mut detections = Vec::new();
         for (pattern, name, description, severity) in &self.patterns {
-            if let Some(secret_match) = pattern.find(line) {
-                findings.push(self.create_finding(
-                    path,
-                    line_number,
-                    line,
-                    Detection {
-                        range: secret_match.range(),
-                        name,
-                        description,
-                        severity: *severity,
-                    },
-                    commit,
-                ));
+            for secret_match in pattern.find_iter(line) {
+                detections.push(Detection {
+                    range: secret_match.range(),
+                    name,
+                    description,
+                    severity: *severity,
+                });
             }
         }
 
         if self.entropy_config.enabled {
-            if let Some(candidate) = extract_entropy_candidate(line, self.entropy_config.min_length)
-            {
+            for candidate in extract_entropy_candidates(line, self.entropy_config.min_length) {
                 if calculate_shannon_entropy(&line[candidate.clone()])
                     >= self.entropy_config.threshold
                 {
-                    findings.push(self.create_finding(
-                        path,
-                        line_number,
-                        line,
-                        Detection {
-                            range: candidate,
-                            name: "high-entropy",
-                            description: "High entropy string detected",
-                            severity: Severity::Medium,
-                        },
-                        commit,
-                    ));
+                    detections.push(Detection {
+                        range: candidate,
+                        name: "high-entropy",
+                        description: "High entropy string detected",
+                        severity: Severity::Medium,
+                    });
                 }
             }
         }
-        findings
+
+        let redactions = merged_ranges(detections.iter().map(|detection| detection.range.clone()));
+        detections
+            .into_iter()
+            .map(|detection| {
+                self.create_finding(path, line_number, line, detection, &redactions, commit)
+            })
+            .collect()
     }
 
     fn create_finding(
@@ -375,6 +369,7 @@ impl Scanner {
         line: usize,
         text: &str,
         detection: Detection<'_>,
+        redactions: &[Range<usize>],
         commit: Option<&CommitMetadata>,
     ) -> Finding {
         Finding {
@@ -382,7 +377,7 @@ impl Scanner {
             line,
             pattern_name: detection.name.to_string(),
             description: detection.description.to_string(),
-            snippet: finding_snippet(text, detection.range, self.show_secrets),
+            snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,
             commit_hash: commit.map(|metadata| metadata.hash.clone()),
             commit_author: commit.map(|metadata| metadata.author.clone()),
@@ -394,32 +389,59 @@ impl Scanner {
 pub(crate) fn finding_snippet(
     text: &str,
     secret_range: Range<usize>,
+    redactions: &[Range<usize>],
     show_secrets: bool,
 ) -> String {
-    let context_length = if show_secrets { 3 } else { 20 };
-    let prefix: String = text[..secret_range.start]
-        .chars()
+    let context_length: usize = if show_secrets { 3 } else { 20 };
+    let start = text[..secret_range.start]
+        .char_indices()
         .rev()
-        .take(context_length)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let suffix: String = text[secret_range.end..]
-        .chars()
-        .take(context_length)
-        .collect();
+        .nth(context_length.saturating_sub(1))
+        .map_or(0, |(index, _)| index);
+    let end = text[secret_range.end..]
+        .char_indices()
+        .nth(context_length)
+        .map_or(text.len(), |(index, _)| secret_range.end + index);
     if show_secrets {
-        format!("{prefix}{}{suffix}", &text[secret_range])
-            .chars()
-            .take(50)
-            .collect()
+        text[start..end].chars().take(50).collect()
     } else {
-        format!("{prefix}[REDACTED]{suffix}")
+        let mut snippet = String::new();
+        let mut cursor = start;
+        for range in redactions {
+            if range.end <= start || range.start >= end {
+                continue;
+            }
+            if range.start > cursor {
+                snippet.push_str(&text[cursor..range.start.min(end)]);
+            }
+            snippet.push_str("[REDACTED]");
+            cursor = cursor.max(range.end).min(end);
+        }
+        if cursor < end {
+            snippet.push_str(&text[cursor..end]);
+        }
+        snippet
     }
 }
 
-fn extract_entropy_candidate(line: &str, min_length: usize) -> Option<Range<usize>> {
+fn merged_ranges(ranges: impl Iterator<Item = Range<usize>>) -> Vec<Range<usize>> {
+    let mut ranges: Vec<_> = ranges.collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut() {
+            if range.start <= previous.end {
+                previous.end = previous.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {
+    let mut candidates = Vec::new();
     for quote in ['"', '\''] {
         let mut offset = 0;
         while let Some(open) = line[offset..].find(quote).map(|index| offset + index) {
@@ -431,21 +453,26 @@ fn extract_entropy_candidate(line: &str, min_length: usize) -> Option<Range<usiz
                 break;
             };
             if is_entropy_token(&line[value_start..close], min_length) {
-                return Some(value_start..close);
+                candidates.push(value_start..close);
             }
             offset = close + quote.len_utf8();
         }
     }
 
-    let separator = line.find(['=', ':'])?;
-    let value = line[separator + 1..].trim();
-    let value = value.trim_end_matches([',', ';']);
-    if !is_entropy_token(value, min_length) {
-        return None;
+    if candidates.is_empty() {
+        if let Some(separator) = line.find(['=', ':']) {
+            let value = line[separator + 1..].trim();
+            let value = value.trim_end_matches([',', ';']);
+            if is_entropy_token(value, min_length) {
+                let start = line.find(value).unwrap_or(separator + 1);
+                candidates.push(start..start + value.len());
+            }
+        }
     }
 
-    let start = line.find(value)?;
-    Some(start..start + value.len())
+    candidates.sort_by_key(|range| range.start);
+    candidates.dedup();
+    candidates
 }
 
 fn is_entropy_token(value: &str, min_length: usize) -> bool {
@@ -537,26 +564,26 @@ mod tests {
     fn entropy_candidates_are_token_shaped() {
         let token = "AbCdEf0123456789_-+/=%AbCdEfXYZ";
         let json = format!(r#""value": "{token}""#);
-        let range = extract_entropy_candidate(&json, 30).unwrap();
+        let ranges = extract_entropy_candidates(&json, 30);
 
-        assert_eq!(&json[range], token);
+        assert_eq!(&json[ranges[0].clone()], token);
         assert!(is_entropy_token(
             "eyJhbGciOiJIUzI1NiJ9.AbCdEf0123456789.signature",
             30
         ));
-        assert!(extract_entropy_candidate(
+        assert!(extract_entropy_candidates(
             r#""Bash(GIT_AUTHOR_DATE=2026-01-01 git commit --amend)""#,
             30
         )
-        .is_none());
-        assert!(extract_entropy_candidate(
+        .is_empty());
+        assert!(extract_entropy_candidates(
             "const prompts = [`first long source expression`, `second expression`];",
             30
         )
-        .is_none());
+        .is_empty());
         assert!(
-            extract_entropy_candidate(r#""platform.example.io/qualified-resource-name""#, 30)
-                .is_none()
+            extract_entropy_candidates(r#""platform.example.io/qualified-resource-name""#, 30)
+                .is_empty()
         );
     }
 
@@ -564,9 +591,75 @@ mod tests {
     fn snippets_centre_the_matched_range() {
         let line = format!("{}{}", "context ".repeat(10), "secret-value");
         let start = line.find("secret-value").unwrap();
+        let secret_range = start..line.len();
+        let redactions = std::slice::from_ref(&secret_range);
 
-        assert!(finding_snippet(&line, start..line.len(), false).contains("[REDACTED]"));
-        assert!(finding_snippet(&line, start..line.len(), true).contains("secret-value"));
+        assert!(
+            finding_snippet(&line, secret_range.clone(), redactions, false).contains("[REDACTED]")
+        );
+        assert!(
+            finding_snippet(&line, secret_range.clone(), redactions, true).contains("secret-value")
+        );
+    }
+
+    #[test]
+    fn every_secret_is_detected_and_redacted() {
+        let scanner = Scanner::with_config(Config {
+            patterns: vec![
+                SecretPattern {
+                    name: "api-key".to_string(),
+                    pattern: r#"api_key="[^"]+""#.to_string(),
+                    description: "API key".to_string(),
+                    severity: Severity::High,
+                },
+                SecretPattern {
+                    name: "password".to_string(),
+                    pattern: r#"pwd="[^"]+""#.to_string(),
+                    description: "Password".to_string(),
+                    severity: Severity::High,
+                },
+            ],
+            entropy: EntropyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        })
+        .unwrap();
+        let first = ["first-api-", "value-123456"].concat();
+        let second = ["second-api-", "value-654321"].concat();
+        let password = ["password-", "123456"].concat();
+        let line = format!(r#"api_key="{first}"; pwd="{password}""#);
+        let mut state = SuppressionState::default();
+        let findings = scanner.scan_line(Path::new("test.rs"), 1, &line, &mut state, None);
+
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(
+            |finding| !finding.snippet.contains(&first) && !finding.snippet.contains(&password)
+        ));
+
+        let repeated = format!(r#"api_key="{first}"; api_key="{second}""#);
+        let findings = scanner.scan_line(Path::new("test.rs"), 1, &repeated, &mut state, None);
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn entropy_checks_later_candidates() {
+        let low = "a".repeat(40);
+        let high = [
+            "ABCDEFGHIJKLMNOPQRST",
+            "UVWXYZabcdefghijklmn",
+            "opqrstuvwxyz0123456789",
+        ]
+        .concat();
+        let line = format!(r#""{low}" "{high}""#);
+        let detected: Vec<_> = extract_entropy_candidates(&line, 30)
+            .into_iter()
+            .filter(|range| calculate_shannon_entropy(&line[range.clone()]) >= 4.8)
+            .collect();
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(&line[detected[0].clone()], high);
     }
 
     #[test]

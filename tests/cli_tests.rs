@@ -186,6 +186,42 @@ fn output_redacts_secrets_by_default() {
 }
 
 #[test]
+fn every_same_line_secret_is_found_and_redacted() {
+    let dir = tempdir().unwrap();
+    let first = ["0123456789abcdef", "FEDCBA9876543210"].concat();
+    let second = ["abcdef0123456789", "0123456789FEDCBA"].concat();
+    let password = ["password-", "123456"].concat();
+    fs::write(
+        dir.path().join("secrets.rs"),
+        format!(r#"api_key = "{first}"; api_key = "{second}"; pwd = "{password}""#),
+    )
+    .unwrap();
+    let config = dir.path().join("redflag.toml");
+    fs::write(&config, "[entropy]\nenabled = false\n").unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding["pattern_name"] == "Generic API Key")
+            .count(),
+        2
+    );
+    assert!(findings.iter().all(|finding| {
+        let snippet = finding["snippet"].as_str().unwrap();
+        !snippet.contains(&first) && !snippet.contains(&second) && !snippet.contains(&password)
+    }));
+}
+
+#[test]
 fn show_secrets_is_explicit() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join(".env"));
