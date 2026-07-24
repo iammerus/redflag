@@ -403,8 +403,8 @@ fn should_skip_entropy_check(line: &str) -> bool {
     }
 
     // Skip common variable assignments with low-risk content
-    if line.contains("const ") || line.contains("let ") || line.contains("var ") {
-        if line.contains("name")
+    if (line.contains("const ") || line.contains("let ") || line.contains("var "))
+        && (line.contains("name")
             || line.contains("title")
             || line.contains("label")
             || line.contains("text")
@@ -439,10 +439,9 @@ fn should_skip_entropy_check(line: &str) -> bool {
             || line.contains("event")
             || line.contains("listener")
             || line.contains("function")
-            || line.contains("method")
-        {
-            return true;
-        }
+            || line.contains("method"))
+    {
+        return true;
     }
 
     // Skip array/object property access and assignments
@@ -928,7 +927,7 @@ fn is_likely_code_not_secret(s: &str) -> bool {
 
     // Check for camelCase or snake_case patterns which are common in code
     let has_camel_case =
-        s.chars().any(|c| c.is_uppercase()) && s.chars().next().map_or(false, |c| c.is_lowercase());
+        s.chars().any(|c| c.is_uppercase()) && s.chars().next().is_some_and(|c| c.is_lowercase());
 
     let has_snake_case = s.contains('_');
 
@@ -945,7 +944,7 @@ fn is_likely_code_not_secret(s: &str) -> bool {
         .all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_');
 
     // Check for enum-like patterns (PascalCase values often used in enums)
-    let has_enum_pattern = s.chars().next().map_or(false, |c| c.is_uppercase()) && !s.contains(' ');
+    let has_enum_pattern = s.chars().next().is_some_and(|c| c.is_uppercase()) && !s.contains(' ');
 
     has_camel_case
         || has_snake_case

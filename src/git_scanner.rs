@@ -538,7 +538,7 @@ mod tests {
 
         scan_git_history_with_handler(dir.path(), &config, &mut handler).unwrap();
         assert!(
-            handler.findings.len() > 0,
+            !handler.findings.is_empty(),
             "Should find secrets in current date range"
         );
     }

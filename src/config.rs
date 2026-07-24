@@ -30,17 +30,12 @@ pub struct GitConfig {
     pub until_date: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 pub enum ExclusionPolicy {
+    #[default]
     Ignore,
     ScanButWarn,
     ScanButAllow,
-}
-
-impl Default for ExclusionPolicy {
-    fn default() -> Self {
-        ExclusionPolicy::Ignore
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,18 +44,13 @@ pub struct ExclusionRule {
     pub policy: ExclusionPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Severity {
     Critical,
     High,
+    #[default]
     Medium,
     Low,
-}
-
-impl Default for Severity {
-    fn default() -> Self {
-        Severity::Medium
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

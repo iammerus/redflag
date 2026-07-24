@@ -6,7 +6,6 @@ mod scanner;
 
 use crate::{config::Config, error::RedflagError, output::OutputHandler, scanner::Scanner};
 use clap::{Parser, Subcommand};
-use env_logger;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;

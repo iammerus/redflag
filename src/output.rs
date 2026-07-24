@@ -21,12 +21,9 @@ pub struct OutputHandler {
 
 impl OutputHandler {
     pub fn new(format: OutputFormat) -> Self {
-        match format {
-            OutputFormat::Json => {
-                print!("[");
-                io::stdout().flush().unwrap();
-            }
-            _ => {}
+        if let OutputFormat::Json = format {
+            print!("[");
+            io::stdout().flush().unwrap();
         }
 
         OutputHandler {
@@ -39,6 +36,7 @@ impl OutputHandler {
         }
     }
 
+    #[cfg(test)]
     fn format_finding(&self, finding: &Finding) -> String {
         match self.format {
             OutputFormat::Text => format!(
@@ -132,39 +130,6 @@ impl OutputHandler {
 
     pub fn findings_count(&self) -> usize {
         self.findings_count
-    }
-
-    #[cfg(test)]
-    pub fn get_findings_summary(&self) -> String {
-        let mut summary = String::new();
-        if self.findings_count == 0 {
-            summary.push_str("No secrets found!\n");
-        } else {
-            summary.push_str("\nScan Summary:\n");
-            summary.push_str("-------------\n");
-            summary.push_str(&format!("Total findings: {}\n", self.findings_count));
-            summary.push_str(&format!(
-                "  Critical: {}\n",
-                self.findings_by_severity
-                    .get(&Severity::Critical)
-                    .unwrap_or(&0)
-            ));
-            summary.push_str(&format!(
-                "  High:     {}\n",
-                self.findings_by_severity.get(&Severity::High).unwrap_or(&0)
-            ));
-            summary.push_str(&format!(
-                "  Medium:   {}\n",
-                self.findings_by_severity
-                    .get(&Severity::Medium)
-                    .unwrap_or(&0)
-            ));
-            summary.push_str(&format!(
-                "  Low:      {}\n",
-                self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)
-            ));
-        }
-        summary
     }
 }
 
