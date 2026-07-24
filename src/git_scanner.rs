@@ -147,7 +147,7 @@ mod tests {
         config: &Config,
         handler: &mut TestHandler,
     ) -> Result<ScanStats, RedflagError> {
-        let scanner = Scanner::with_config(config.clone());
+        let scanner = Scanner::with_config(config.clone())?;
         scan_git_history_with_handler(path, &scanner, &config.git, handler)
     }
 
@@ -409,7 +409,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let scanner = Scanner::with_config(config.clone());
+        let scanner = Scanner::with_config(config.clone()).unwrap();
         let mut working = TestHandler::new();
         scanner
             .scan_with_handler(dir.path().to_str().unwrap(), &mut working)

@@ -6,7 +6,6 @@ use glob::Pattern;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
-    collections::HashSet,
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -76,47 +75,38 @@ pub trait FindingHandler {
 }
 
 impl Scanner {
-    pub fn with_config(config: Config) -> Self {
-        let mut patterns = Vec::new();
-        let mut seen = HashSet::new();
-
-        // Process all patterns
-        for p in config.patterns {
-            if seen.contains(&p.name) {
-                continue;
-            }
-            match Regex::new(&p.pattern) {
-                Ok(re) => {
-                    seen.insert(p.name.clone());
-                    patterns.push((re, p.name, p.description, p.severity));
-                }
-                Err(e) => eprintln!("Invalid pattern {}: {}", p.name, e),
-            }
-        }
-
-        // Compile exclusion patterns
+    pub fn with_config(config: Config) -> Result<Self, RedflagError> {
+        let patterns = config
+            .patterns
+            .into_iter()
+            .map(|pattern| {
+                Ok((
+                    Regex::new(&pattern.pattern)?,
+                    pattern.name,
+                    pattern.description,
+                    pattern.severity,
+                ))
+            })
+            .collect::<Result<Vec<_>, RedflagError>>()?;
         let exclusions = config
             .exclusions
             .into_iter()
-            .filter_map(|r| match Pattern::new(&r.pattern) {
-                Ok(pattern) => Some(ExclusionRule {
-                    pattern,
-                    policy: r.policy,
-                }),
-                Err(e) => {
-                    eprintln!("Invalid exclusion pattern '{}': {}", r.pattern, e);
-                    None
-                }
+            .map(|rule| {
+                Ok(ExclusionRule {
+                    pattern: Pattern::new(&rule.pattern)
+                        .map_err(|error| RedflagError::Config(error.to_string()))?,
+                    policy: rule.policy,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, RedflagError>>()?;
 
-        Scanner {
+        Ok(Scanner {
             patterns,
             entropy_config: config.entropy,
             extensions: config.extensions,
             exclusions,
             show_secrets: false,
-        }
+        })
     }
 
     pub fn show_secrets(mut self, show_secrets: bool) -> Self {
@@ -461,7 +451,7 @@ mod tests {
             ..Config::default()
         };
 
-        let scanner = Scanner::with_config(config);
+        let scanner = Scanner::with_config(config)?;
         let mut handler = TestHandler::default();
         scanner.scan_with_handler(dir.path().to_str().unwrap(), &mut handler)?;
 

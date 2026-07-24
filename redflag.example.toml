@@ -1,8 +1,13 @@
+# Extensions extend the built-in list and are deduplicated.
+extensions = ["tf", "hcl"]
+
+# Present scalar sections replace their defaults.
 [entropy]
 enabled = true
 threshold = 3.8
 min_length = 24
 
+# Exclusions extend the built-in list. The last matching rule wins.
 [[exclusions]]
 pattern = "**/node_modules/**"
 policy = "Ignore"
@@ -19,8 +24,16 @@ policy = "ScanButWarn"
 name = "stripe-key"
 pattern = '''(?i)stripe_(secret|live)_key\s*=\s*['"]?(sk_(live|test)_[a-zA-Z0-9]{24})'''
 description = "Stripe Secret Key"
+severity = "Critical"
 
+# A pattern with a built-in name replaces that rule.
 [[patterns]]
-name = "jwt-token" 
+name = "JWT Token"
 pattern = '''(?i)eyJ[a-zA-Z0-9_-]{5,}\.eyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{10,}'''
 description = "JWT Token"
+severity = "High"
+
+# An empty revision list scans HEAD.
+[git]
+max_depth = 1000
+branches = []

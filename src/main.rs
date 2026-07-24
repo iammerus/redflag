@@ -131,8 +131,9 @@ fn run_scan(
             config.git.until_date = Some(until);
         }
     }
+    config.validate()?;
 
-    let scanner = Scanner::with_config(config.clone()).show_secrets(show_secrets);
+    let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
     let mut handler = OutputHandler::new(format);
 
     // Stream findings instead of collecting them

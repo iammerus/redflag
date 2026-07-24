@@ -1,24 +1,22 @@
 use crate::error::RedflagError;
+use chrono::NaiveDate;
+use glob::Pattern;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
-    #[serde(default = "default_patterns")]
     pub patterns: Vec<SecretPattern>,
-    #[serde(default = "default_extensions")]
     pub extensions: Vec<String>,
-    #[serde(default = "default_exclusions")]
     pub exclusions: Vec<ExclusionRule>,
-    #[serde(default)]
     pub entropy: EntropyConfig,
-    #[serde(default)]
     pub git: GitConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GitConfig {
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
@@ -38,7 +36,7 @@ pub enum ExclusionPolicy {
     ScanButAllow,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ExclusionRule {
     pub pattern: String,
     pub policy: ExclusionPolicy,
@@ -53,7 +51,7 @@ pub enum Severity {
     Low,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SecretPattern {
     pub name: String,
     pub pattern: String,
@@ -62,7 +60,7 @@ pub struct SecretPattern {
     pub severity: Severity,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntropyConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -70,6 +68,18 @@ pub struct EntropyConfig {
     pub threshold: f64,
     #[serde(default = "default_min_length")]
     pub min_length: usize,
+}
+
+#[derive(Default, Deserialize)]
+struct PartialConfig {
+    #[serde(default)]
+    patterns: Vec<SecretPattern>,
+    #[serde(default)]
+    extensions: Vec<String>,
+    #[serde(default)]
+    exclusions: Vec<ExclusionRule>,
+    entropy: Option<EntropyConfig>,
+    git: Option<GitConfig>,
 }
 
 impl Default for EntropyConfig {
@@ -410,7 +420,7 @@ impl Default for GitConfig {
     fn default() -> Self {
         Self {
             max_depth: default_max_depth(),
-            branches: vec!["main".to_string(), "master".to_string()],
+            branches: Vec::new(),
             since_date: None,
             until_date: None,
         }
@@ -422,27 +432,88 @@ impl Config {
         let mut config = Config::default();
 
         if let Some(config_path) = path {
-            let user_config: Config = toml::from_str(&fs::read_to_string(config_path)?)?;
+            let user: PartialConfig = toml::from_str(&fs::read_to_string(config_path)?)?;
 
-            // Merge user config with defaults
-            config.patterns.extend(user_config.patterns);
-            config.extensions.extend(user_config.extensions);
-            config.exclusions.extend(user_config.exclusions);
-
-            // Override entropy and git configs if specified
-            if user_config.entropy.enabled {
-                config.entropy = user_config.entropy;
+            for pattern in user.patterns {
+                if let Some(existing) = config
+                    .patterns
+                    .iter()
+                    .position(|current| current.name == pattern.name)
+                {
+                    config.patterns[existing] = pattern;
+                } else {
+                    config.patterns.push(pattern);
+                }
             }
-            if user_config.git.max_depth != default_max_depth()
-                || !user_config.git.branches.is_empty()
-                || user_config.git.since_date.is_some()
-                || user_config.git.until_date.is_some()
-            {
-                config.git = user_config.git;
+            for extension in user.extensions {
+                if !config
+                    .extensions
+                    .iter()
+                    .any(|current| current.eq_ignore_ascii_case(&extension))
+                {
+                    config.extensions.push(extension);
+                }
+            }
+            for exclusion in user.exclusions {
+                if !config.exclusions.contains(&exclusion) {
+                    config.exclusions.push(exclusion);
+                }
+            }
+            if let Some(entropy) = user.entropy {
+                config.entropy = entropy;
+            }
+            if let Some(git) = user.git {
+                config.git = git;
             }
         }
 
+        config.validate()?;
         Ok(config)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RedflagError> {
+        for pattern in &self.patterns {
+            Regex::new(&pattern.pattern).map_err(|error| {
+                RedflagError::Config(format!("Invalid regex for '{}': {error}", pattern.name))
+            })?;
+        }
+        for exclusion in &self.exclusions {
+            Pattern::new(&exclusion.pattern).map_err(|error| {
+                RedflagError::Config(format!(
+                    "Invalid exclusion glob '{}': {error}",
+                    exclusion.pattern
+                ))
+            })?;
+        }
+        if !self.entropy.threshold.is_finite() || self.entropy.threshold < 0.0 {
+            return Err(RedflagError::Config(
+                "Entropy threshold must be finite and nonnegative".to_string(),
+            ));
+        }
+        if self.entropy.min_length == 0 {
+            return Err(RedflagError::Config(
+                "Entropy minimum length must be greater than zero".to_string(),
+            ));
+        }
+        if self.git.max_depth == 0 {
+            return Err(RedflagError::Config(
+                "Git maximum depth must be greater than zero".to_string(),
+            ));
+        }
+
+        let since = parse_date("git.since_date", self.git.since_date.as_deref())?;
+        let until = parse_date("git.until_date", self.git.until_date.as_deref())?;
+        if since.zip(until).is_some_and(|(start, end)| start > end) {
+            return Err(RedflagError::Config(
+                "git.since_date must not be after git.until_date".to_string(),
+            ));
+        }
+        if let Some(branch) = self.git.branches.iter().find(|branch| branch.is_empty()) {
+            return Err(RedflagError::Config(format!(
+                "Git revision must not be empty: '{branch}'"
+            )));
+        }
+        Ok(())
     }
 
     pub fn save(&self, path: &PathBuf) -> Result<(), RedflagError> {
@@ -457,6 +528,20 @@ impl Config {
     }
 }
 
+fn parse_date(name: &str, value: Option<&str>) -> Result<Option<NaiveDate>, RedflagError> {
+    value
+        .map(|date| {
+            if date.len() != 10 {
+                return Err(RedflagError::Config(format!(
+                    "{name} must use YYYY-MM-DD: '{date}'"
+                )));
+            }
+            NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|_| RedflagError::Config(format!("{name} must use YYYY-MM-DD: '{date}'")))
+        })
+        .transpose()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -466,5 +551,105 @@ impl Default for Config {
             entropy: EntropyConfig::default(),
             git: GitConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn load(contents: &str) -> Result<Config, RedflagError> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("redflag.toml");
+        fs::write(&path, contents).unwrap();
+        Config::load(Some(path))
+    }
+
+    #[test]
+    fn present_entropy_section_replaces_defaults() {
+        let disabled = load("[entropy]\nenabled = false\n").unwrap();
+        assert!(!disabled.entropy.enabled);
+
+        let partial = load("[entropy]\nthreshold = 3.2\n").unwrap();
+        assert!(partial.entropy.enabled);
+        assert_eq!(partial.entropy.threshold, 3.2);
+        assert_eq!(partial.entropy.min_length, default_min_length());
+    }
+
+    #[test]
+    fn custom_patterns_replace_by_name() {
+        let config = load(
+            r#"
+[[patterns]]
+name = "Generic API Key"
+pattern = "custom"
+description = "Custom rule"
+severity = "Low"
+"#,
+        )
+        .unwrap();
+        let patterns: Vec<_> = config
+            .patterns
+            .iter()
+            .filter(|pattern| pattern.name == "Generic API Key")
+            .collect();
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].pattern, "custom");
+        assert_eq!(patterns[0].severity, Severity::Low);
+    }
+
+    #[test]
+    fn extensions_are_deduplicated() {
+        let config = load("extensions = [\"RS\", \"custom\"]\n").unwrap();
+
+        assert_eq!(
+            config
+                .extensions
+                .iter()
+                .filter(|extension| extension.eq_ignore_ascii_case("rs"))
+                .count(),
+            1
+        );
+        assert!(config.extensions.contains(&"custom".to_string()));
+    }
+
+    #[test]
+    fn invalid_values_are_rejected() {
+        for (contents, expected) in [
+            (
+                r#"[[patterns]]
+name = "broken"
+pattern = "["
+description = "Broken"
+"#,
+                "Invalid regex",
+            ),
+            (
+                r#"[[exclusions]]
+pattern = "["
+policy = "Ignore"
+"#,
+                "Invalid exclusion glob",
+            ),
+            ("[git]\nsince_date = \"24-07-2026\"\n", "YYYY-MM-DD"),
+            (
+                "[git]\nsince_date = \"2026-07-25\"\nuntil_date = \"2026-07-24\"\n",
+                "must not be after",
+            ),
+        ] {
+            let error = load(contents).unwrap_err().to_string();
+            assert!(error.contains(expected), "Unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn generated_config_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("redflag.toml");
+        Config::generate_default_config(&path).unwrap();
+
+        assert_eq!(Config::load(Some(path)).unwrap(), Config::default());
     }
 }

@@ -94,6 +94,47 @@ fn show_secrets_is_explicit() {
 }
 
 #[test]
+fn entropy_can_be_disabled() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("value.rs"),
+        "opaque = \"abcdefghijklmnopqrstuvwxyzABCDEF\"\n",
+    )
+    .unwrap();
+    let config = dir.path().join("redflag.toml");
+    fs::write(&config, "[entropy]\nenabled = false\n").unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn invalid_config_is_an_error() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let config = dir.path().join("redflag.toml");
+    fs::write(
+        &config,
+        "[[patterns]]\nname = \"broken\"\npattern = \"[\"\ndescription = \"Broken\"\n",
+    )
+    .unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid regex"));
+}
+
+#[test]
 fn closed_output_pipe_is_an_error() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join(".env"));
