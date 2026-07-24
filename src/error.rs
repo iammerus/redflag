@@ -1,17 +1,17 @@
-use thiserror::Error;
 use indicatif::style::TemplateError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RedflagError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Configuration error: {0}")]
     Config(String),
-    
+
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
-    
+
     #[error("Git error: {0}")]
     Git(#[from] git2::Error),
 

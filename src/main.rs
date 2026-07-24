@@ -1,19 +1,14 @@
 mod config;
 mod error;
+mod git_scanner;
 mod output;
 mod scanner;
-mod git_scanner;
 
+use crate::{config::Config, error::RedflagError, output::OutputHandler, scanner::Scanner};
 use clap::{Parser, Subcommand};
-use crate::{
-    config::Config,
-    error::RedflagError,
-    scanner::Scanner,
-    output::OutputHandler
-};
-use std::path::PathBuf;
-use std::path::Path;
 use env_logger;
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -28,10 +23,10 @@ enum Commands {
     Scan {
         #[arg(default_value = ".")]
         path: String,
-        
+
         #[arg(short, long)]
         config: Option<PathBuf>,
-        
+
         #[arg(short, long, value_enum, default_value = "text")]
         format: output::OutputFormat,
 
@@ -64,8 +59,27 @@ fn main() -> Result<(), RedflagError> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { path, config, format, git_history, git_max_depth, git_since, git_until, git_branches } => 
-            run_scan(path, config, format, git_history, GitScanOptions { max_depth: git_max_depth, branches: git_branches, since_date: git_since, until_date: git_until }),
+        Commands::Scan {
+            path,
+            config,
+            format,
+            git_history,
+            git_max_depth,
+            git_since,
+            git_until,
+            git_branches,
+        } => run_scan(
+            path,
+            config,
+            format,
+            git_history,
+            GitScanOptions {
+                max_depth: git_max_depth,
+                branches: git_branches,
+                since_date: git_since,
+                until_date: git_until,
+            },
+        ),
         Commands::InstallHook => install_hook(),
         Commands::GenerateConfig { path } => generate_default_config(&path),
     }
@@ -79,7 +93,7 @@ fn run_scan(
     git_options: GitScanOptions,
 ) -> Result<(), RedflagError> {
     let mut config = Config::load(config_path)?;
-    
+
     // Override git config with CLI options if provided
     if git_history {
         if let Some(depth) = git_options.max_depth {
@@ -98,14 +112,14 @@ fn run_scan(
 
     let scanner = Scanner::with_config(config.clone());
     let mut handler = OutputHandler::new(format);
-    
+
     // Stream findings instead of collecting them
     scanner.scan_with_handler(&path, &mut handler)?;
-    
+
     if git_history {
         git_scanner::scan_git_history_with_handler(Path::new(&path), &config, &mut handler)?;
     }
-    
+
     handler.finish()?;
     Ok(())
 }

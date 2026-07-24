@@ -1,13 +1,13 @@
-use crate::scanner::{Finding, FindingHandler};
 use crate::config::Severity;
+use crate::scanner::{Finding, FindingHandler};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
-use std::collections::HashMap;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum OutputFormat {
     Text,
-    Json
+    Json,
 }
 
 pub struct OutputHandler {
@@ -28,7 +28,7 @@ impl OutputHandler {
             }
             _ => {}
         }
-        
+
         OutputHandler {
             format,
             findings_count: 0,
@@ -61,7 +61,8 @@ impl OutputHandler {
             Severity::High => "HIGH    ",
             Severity::Medium => "MEDIUM  ",
             Severity::Low => "LOW     ",
-        }.to_string()
+        }
+        .to_string()
     }
 
     fn get_severity_color(&self, severity: Severity) -> Color {
@@ -97,16 +98,36 @@ impl OutputHandler {
                     writeln!(self.writer, "\nScan Summary:")?;
                     writeln!(self.writer, "-------------")?;
                     writeln!(self.writer, "Total findings: {}", self.findings_count)?;
-                    writeln!(self.writer, "  Critical: {}", self.findings_by_severity.get(&Severity::Critical).unwrap_or(&0))?;
-                    writeln!(self.writer, "  High:     {}", self.findings_by_severity.get(&Severity::High).unwrap_or(&0))?;
-                    writeln!(self.writer, "  Medium:   {}", self.findings_by_severity.get(&Severity::Medium).unwrap_or(&0))?;
-                    writeln!(self.writer, "  Low:      {}", self.findings_by_severity.get(&Severity::Low).unwrap_or(&0))?;
+                    writeln!(
+                        self.writer,
+                        "  Critical: {}",
+                        self.findings_by_severity
+                            .get(&Severity::Critical)
+                            .unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  High:     {}",
+                        self.findings_by_severity.get(&Severity::High).unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  Medium:   {}",
+                        self.findings_by_severity
+                            .get(&Severity::Medium)
+                            .unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  Low:      {}",
+                        self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)
+                    )?;
                 }
             }
         }
-        
+
         self.writer.flush()?;
-        
+
         #[cfg(not(test))]
         {
             if self.findings_count > 0 {
@@ -125,10 +146,26 @@ impl OutputHandler {
             summary.push_str("\nScan Summary:\n");
             summary.push_str("-------------\n");
             summary.push_str(&format!("Total findings: {}\n", self.findings_count));
-            summary.push_str(&format!("  Critical: {}\n", self.findings_by_severity.get(&Severity::Critical).unwrap_or(&0)));
-            summary.push_str(&format!("  High:     {}\n", self.findings_by_severity.get(&Severity::High).unwrap_or(&0)));
-            summary.push_str(&format!("  Medium:   {}\n", self.findings_by_severity.get(&Severity::Medium).unwrap_or(&0)));
-            summary.push_str(&format!("  Low:      {}\n", self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)));
+            summary.push_str(&format!(
+                "  Critical: {}\n",
+                self.findings_by_severity
+                    .get(&Severity::Critical)
+                    .unwrap_or(&0)
+            ));
+            summary.push_str(&format!(
+                "  High:     {}\n",
+                self.findings_by_severity.get(&Severity::High).unwrap_or(&0)
+            ));
+            summary.push_str(&format!(
+                "  Medium:   {}\n",
+                self.findings_by_severity
+                    .get(&Severity::Medium)
+                    .unwrap_or(&0)
+            ));
+            summary.push_str(&format!(
+                "  Low:      {}\n",
+                self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)
+            ));
         }
         summary
     }
@@ -137,20 +174,30 @@ impl OutputHandler {
 impl FindingHandler for OutputHandler {
     fn handle(&mut self, finding: Finding) {
         self.findings_count += 1;
-        *self.findings_by_severity.entry(finding.severity).or_insert(0) += 1;
-        
+        *self
+            .findings_by_severity
+            .entry(finding.severity)
+            .or_insert(0) += 1;
+
         match self.format {
             OutputFormat::Text => {
                 // Set color based on severity
                 self.color_stream
-                    .set_color(ColorSpec::new().set_fg(Some(self.get_severity_color(finding.severity))))
+                    .set_color(
+                        ColorSpec::new().set_fg(Some(self.get_severity_color(finding.severity))),
+                    )
                     .unwrap();
-                
-                write!(self.color_stream, "[{}] ", self.format_severity(finding.severity)).unwrap();
-                
+
+                write!(
+                    self.color_stream,
+                    "[{}] ",
+                    self.format_severity(finding.severity)
+                )
+                .unwrap();
+
                 // Reset color for the rest of the output
                 self.color_stream.reset().unwrap();
-                
+
                 writeln!(
                     self.writer,
                     "{}:{} - {} - {}\nSnippet: {}{}\n",
@@ -160,14 +207,20 @@ impl FindingHandler for OutputHandler {
                     finding.description,
                     finding.snippet,
                     self.format_commit_info(&finding)
-                ).unwrap();
+                )
+                .unwrap();
             }
             OutputFormat::Json => {
                 if !self.first_finding {
                     write!(self.writer, ",").unwrap();
                 }
                 self.first_finding = false;
-                write!(self.writer, "\n{}", serde_json::to_string_pretty(&finding).unwrap()).unwrap();
+                write!(
+                    self.writer,
+                    "\n{}",
+                    serde_json::to_string_pretty(&finding).unwrap()
+                )
+                .unwrap();
             }
         }
         self.writer.flush().unwrap();
@@ -200,7 +253,7 @@ mod tests {
         let finding = create_test_finding(Severity::High);
         let handler = OutputHandler::new(OutputFormat::Text);
         let output = handler.format_finding(&finding);
-        
+
         assert!(output.contains("[HIGH"));
         assert!(output.contains("test.rs:42"));
         assert!(output.contains("test-pattern"));
@@ -211,7 +264,7 @@ mod tests {
     #[test]
     fn test_severity_formatting() {
         let handler = OutputHandler::new(OutputFormat::Text);
-        
+
         assert_eq!(handler.format_severity(Severity::Critical), "CRITICAL");
         assert_eq!(handler.format_severity(Severity::High), "HIGH    ");
         assert_eq!(handler.format_severity(Severity::Medium), "MEDIUM  ");
@@ -221,7 +274,7 @@ mod tests {
     #[test]
     fn test_severity_colors() {
         let handler = OutputHandler::new(OutputFormat::Text);
-        
+
         assert_eq!(handler.get_severity_color(Severity::Critical), Color::Red);
         assert_eq!(handler.get_severity_color(Severity::High), Color::Magenta);
         assert_eq!(handler.get_severity_color(Severity::Medium), Color::Yellow);
@@ -244,7 +297,7 @@ mod tests {
 
         let handler = OutputHandler::new(OutputFormat::Json);
         let output = handler.format_finding(&finding);
-        
+
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["file"], "test.rs");
         assert_eq!(parsed["line"], 42);
@@ -260,33 +313,33 @@ mod tests {
         handler.handle(create_test_finding(Severity::High));
         handler.handle(create_test_finding(Severity::Medium));
         handler.handle(create_test_finding(Severity::Low));
-        
+
         // Create a Vec to store the output
         let output_buffer = Arc::new(Mutex::new(Vec::new()));
         let output_buffer_clone = Arc::clone(&output_buffer);
-        
+
         struct TestWriter(Arc<Mutex<Vec<u8>>>);
-        
+
         impl Write for TestWriter {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 let mut buffer = self.0.lock().unwrap();
                 buffer.extend_from_slice(buf);
                 Ok(buf.len())
             }
-            
+
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
         }
-        
+
         // Use our test writer
         handler.writer = Box::new(TestWriter(output_buffer));
         handler.finish().unwrap();
-        
+
         // Get the output from our writer
         let buffer = output_buffer_clone.lock().unwrap();
         let output = String::from_utf8(buffer.clone()).unwrap();
-        
+
         assert!(output.contains("Total findings: 5"));
         assert!(output.contains("Critical: 2"));
         assert!(output.contains("High:     1"));

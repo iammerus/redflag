@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::fs;
-use once_cell::sync::Lazy;
 use crate::error::RedflagError;
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -448,9 +448,15 @@ fn default_exclusions() -> Vec<ExclusionRule> {
     ]
 }
 
-fn default_true() -> bool { true }
-fn default_threshold() -> f64 { 4.8 }
-fn default_min_length() -> usize { 30 }
+fn default_true() -> bool {
+    true
+}
+fn default_threshold() -> f64 {
+    4.8
+}
+fn default_min_length() -> usize {
+    30
+}
 
 fn default_max_depth() -> usize {
     1000
@@ -473,20 +479,21 @@ impl Config {
 
         if let Some(config_path) = path {
             let user_config: Config = toml::from_str(&fs::read_to_string(config_path)?)?;
-            
+
             // Merge user config with defaults
             config.patterns.extend(user_config.patterns);
             config.extensions.extend(user_config.extensions);
             config.exclusions.extend(user_config.exclusions);
-            
+
             // Override entropy and git configs if specified
             if user_config.entropy.enabled {
                 config.entropy = user_config.entropy;
             }
-            if user_config.git.max_depth != default_max_depth() || 
-               !user_config.git.branches.is_empty() ||
-               user_config.git.since_date.is_some() ||
-               user_config.git.until_date.is_some() {
+            if user_config.git.max_depth != default_max_depth()
+                || !user_config.git.branches.is_empty()
+                || user_config.git.since_date.is_some()
+                || user_config.git.until_date.is_some()
+            {
                 config.git = user_config.git;
             }
         }
