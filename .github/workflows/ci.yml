@@ -11,7 +11,11 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
-      - run: cargo test --all-features
+          components: rustfmt, clippy
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+      - run: cargo build --release
 
   release-linux:
     needs: test

@@ -391,14 +391,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/*.min.js".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
-        ExclusionRule {
-            pattern: "**/*.test.*".to_string(),
-            policy: ExclusionPolicy::ScanButWarn,
-        },
-        ExclusionRule {
-            pattern: "**/*.spec.*".to_string(),
-            policy: ExclusionPolicy::ScanButWarn,
-        },
     ]
 }
 

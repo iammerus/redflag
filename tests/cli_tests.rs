@@ -256,6 +256,14 @@ fn scans_test_named_file() {
 }
 
 #[test]
+fn scans_test_suffix_file() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("credentials.test.rs"));
+
+    assert_eq!(redflag(dir.path()).status.code(), Some(1));
+}
+
+#[test]
 fn scans_packages_directory() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join("packages/service/config.rs"));
@@ -270,6 +278,77 @@ fn scans_explicit_extensionless_file() {
     write_secret(&path);
 
     assert_eq!(redflag(&path).status.code(), Some(1));
+}
+
+#[test]
+fn last_exclusion_rule_wins() {
+    for (last_policy, expected) in [("ScanButAllow", 1), ("Ignore", 0)] {
+        let dir = tempdir().unwrap();
+        write_secret(&dir.path().join("secret.rs"));
+        let config = dir.path().join("redflag.toml");
+        fs::write(
+            &config,
+            format!(
+                r#"
+[[exclusions]]
+pattern = "**/secret.rs"
+policy = "Ignore"
+
+[[exclusions]]
+pattern = "**/secret.rs"
+policy = "{last_policy}"
+"#
+            ),
+        )
+        .unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(expected));
+    }
+}
+
+#[test]
+fn scan_but_warn_uses_stderr() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("warning.rs"));
+    let config = dir.path().join("redflag.toml");
+    fs::write(
+        &config,
+        r#"
+[[exclusions]]
+pattern = "**/warning.rs"
+policy = "ScanButWarn"
+"#,
+    )
+    .unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("No secrets found"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WARNING"));
+}
+
+#[test]
+fn repeated_output_is_stable() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("b.rs"));
+    write_secret(&dir.path().join("a.rs"));
+    let args = ["scan", dir.path().to_str().unwrap(), "--format", "json"];
+
+    assert_eq!(
+        redflag_with_args(&args).stdout,
+        redflag_with_args(&args).stdout
+    );
 }
 
 #[cfg(unix)]
