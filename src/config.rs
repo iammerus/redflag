@@ -154,7 +154,7 @@ static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
         },
         SecretPattern {
             name: "Generic Fallback Secret".to_string(),
-            pattern: r#"(?i):\s*process\.env\.[A-Za-z0-9_]+\s*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
+            pattern: r#"(?i)(secret|token|credential|api[_\-\s]*key)\s*:\s*process\.env\.[A-Za-z0-9_]+\s*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
             description: "Possible hardcoded secret with environment fallback".to_string(),
             severity: Severity::High,
         },
@@ -602,6 +602,20 @@ severity = "Low"
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].pattern, "custom");
         assert_eq!(patterns[0].severity, Severity::Low);
+    }
+
+    #[test]
+    fn fallback_secret_requires_secret_field() {
+        let pattern = default_patterns()
+            .into_iter()
+            .find(|pattern| pattern.name == "Generic Fallback Secret")
+            .unwrap();
+        let regex = Regex::new(&pattern.pattern).unwrap();
+
+        assert!(
+            regex.is_match(r#"clientSecret: process.env.CLIENT_SECRET || "development-secret""#)
+        );
+        assert!(!regex.is_match(r#"baseURL: process.env.BASE_URL || "http://127.0.0.1:8000""#));
     }
 
     #[test]
