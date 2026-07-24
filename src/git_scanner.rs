@@ -40,6 +40,7 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
 
     let mut stats = ScanStats::default();
     let total = commits.len();
+    stats.commits = total;
     for (index, commit) in commits.into_iter().enumerate() {
         let current = index + 1;
         let short_hash = commit.id().to_string()[..8].to_string();
@@ -327,9 +328,10 @@ mod tests {
             },
         };
 
-        scan(dir.path(), &config, &mut handler)?;
+        let stats = scan(dir.path(), &config, &mut handler)?;
 
         assert_eq!(handler.findings.len(), 2, "Expected to find 2 secrets");
+        assert_eq!(stats.commits, 3);
         assert!(matches!(
             handler.progress.first(),
             Some(ScanProgress::Preparing {

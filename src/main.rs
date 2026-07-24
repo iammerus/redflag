@@ -142,9 +142,9 @@ fn run_scan(
     if working_result.is_err() {
         handler.clear_progress();
     }
-    working_result?;
+    let working_stats = working_result?;
 
-    if git_history {
+    let history_stats = if git_history {
         let history_result = git_scanner::scan_git_history_with_handler(
             Path::new(&path),
             &scanner,
@@ -154,10 +154,12 @@ fn run_scan(
         if history_result.is_err() {
             handler.clear_progress();
         }
-        history_result?;
-    }
+        Some(history_result?)
+    } else {
+        None
+    };
 
-    handler.finish()?;
+    handler.finish(&working_stats, history_stats.as_ref())?;
     Ok(u8::from(handler.findings_count() > 0))
 }
 

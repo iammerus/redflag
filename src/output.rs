@@ -1,7 +1,7 @@
 use crate::{
     config::Severity,
     error::RedflagError,
-    scanner::{Finding, FindingHandler, ScanProgress},
+    scanner::{Finding, FindingHandler, ScanProgress, ScanStats},
 };
 use std::{
     collections::HashMap,
@@ -184,42 +184,68 @@ impl OutputHandler {
         self.progress_phase = None;
     }
 
-    pub fn finish(&mut self) -> Result<(), RedflagError> {
+    pub fn finish(
+        &mut self,
+        working: &ScanStats,
+        history: Option<&ScanStats>,
+    ) -> Result<(), RedflagError> {
         self.clear_progress();
         match self.format {
             OutputFormat::Json if self.first_finding => writeln!(self.writer, "[]")?,
             OutputFormat::Json => writeln!(self.writer, "\n]")?,
-            OutputFormat::Text if self.findings_count == 0 => {
-                writeln!(self.writer, "No secrets found!")?;
-            }
             OutputFormat::Text => {
+                if self.findings_count == 0 {
+                    writeln!(self.writer, "No secrets found!")?;
+                }
                 writeln!(self.writer, "\nScan Summary:")?;
                 writeln!(self.writer, "-------------")?;
+                writeln!(
+                    self.writer,
+                    "Working tree: {} {}, {} {}",
+                    working.files,
+                    Self::plural(working.files, "file", "files"),
+                    working.findings,
+                    Self::plural(working.findings, "finding", "findings")
+                )?;
+                if let Some(history) = history {
+                    writeln!(
+                        self.writer,
+                        "Git history: {} {}, {} changed {}, {} {}",
+                        history.commits,
+                        Self::plural(history.commits, "commit", "commits"),
+                        history.files,
+                        Self::plural(history.files, "file", "files"),
+                        history.findings,
+                        Self::plural(history.findings, "finding", "findings")
+                    )?;
+                }
                 writeln!(self.writer, "Total findings: {}", self.findings_count)?;
-                writeln!(
-                    self.writer,
-                    "  Critical: {}",
-                    self.findings_by_severity
-                        .get(&Severity::Critical)
-                        .unwrap_or(&0)
-                )?;
-                writeln!(
-                    self.writer,
-                    "  High:     {}",
-                    self.findings_by_severity.get(&Severity::High).unwrap_or(&0)
-                )?;
-                writeln!(
-                    self.writer,
-                    "  Medium:   {}",
-                    self.findings_by_severity
-                        .get(&Severity::Medium)
-                        .unwrap_or(&0)
-                )?;
-                writeln!(
-                    self.writer,
-                    "  Low:      {}",
-                    self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)
-                )?;
+                if self.findings_count > 0 {
+                    writeln!(
+                        self.writer,
+                        "  Critical: {}",
+                        self.findings_by_severity
+                            .get(&Severity::Critical)
+                            .unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  High:     {}",
+                        self.findings_by_severity.get(&Severity::High).unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  Medium:   {}",
+                        self.findings_by_severity
+                            .get(&Severity::Medium)
+                            .unwrap_or(&0)
+                    )?;
+                    writeln!(
+                        self.writer,
+                        "  Low:      {}",
+                        self.findings_by_severity.get(&Severity::Low).unwrap_or(&0)
+                    )?;
+                }
             }
         }
 
@@ -229,6 +255,14 @@ impl OutputHandler {
 
     pub fn findings_count(&self) -> usize {
         self.findings_count
+    }
+
+    fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+        if count == 1 {
+            singular
+        } else {
+            plural
+        }
     }
 }
 
@@ -337,16 +371,30 @@ mod tests {
         }
     }
 
-    fn output(format: OutputFormat, findings: Vec<Finding>) -> String {
+    fn output_with_stats(
+        format: OutputFormat,
+        findings: Vec<Finding>,
+        working: ScanStats,
+        history: Option<ScanStats>,
+    ) -> String {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let mut handler =
             OutputHandler::with_writer(format, Box::new(SharedWriter(Arc::clone(&bytes))));
         for finding in findings {
             handler.handle(finding).unwrap();
         }
-        handler.finish().unwrap();
+        handler.finish(&working, history.as_ref()).unwrap();
         let output = bytes.lock().unwrap().clone();
         String::from_utf8(output).unwrap()
+    }
+
+    fn output(format: OutputFormat, findings: Vec<Finding>) -> String {
+        let stats = ScanStats {
+            files: 1,
+            findings: findings.len(),
+            commits: 0,
+        };
+        output_with_stats(format, findings, stats, None)
     }
 
     #[test]
@@ -367,6 +415,28 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn text_summary_splits_working_tree_and_history() {
+        let output = output_with_stats(
+            OutputFormat::Text,
+            (0..6).map(|_| finding(Severity::Medium)).collect(),
+            ScanStats {
+                files: 5,
+                findings: 6,
+                commits: 0,
+            },
+            Some(ScanStats {
+                files: 321,
+                findings: 0,
+                commits: 1000,
+            }),
+        );
+
+        assert!(output.contains("Working tree: 5 files, 6 findings"));
+        assert!(output.contains("Git history: 1000 commits, 321 changed files, 0 findings"));
+        assert!(output.contains("Total findings: 6"));
     }
 
     #[test]

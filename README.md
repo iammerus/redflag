@@ -45,6 +45,10 @@ stdout contains only the selected report format. Errors, warnings, and progress
 belong on stderr. JSON output is one valid array for clean and finding-producing
 scans.
 
+Interactive scans show a single-line progress bar on stderr. Redirected output
+and CI stay quiet automatically. Use `--no-progress` to disable progress in a
+terminal.
+
 Matched values are replaced with `[REDACTED]` by default. Use `--show-secrets`
 only when raw values are genuinely required, and treat that output as sensitive.
 
@@ -61,6 +65,7 @@ redflag scan [PATH]
 | `-c, --config <FILE>` | Load a TOML configuration |
 | `-f, --format <text\|json>` | Select text or JSON output |
 | `--show-secrets` | Include raw matched values |
+| `--no-progress` | Disable interactive progress output |
 | `--git-history` | Also scan reachable Git history |
 | `--git-branches <REVISIONS>` | Scan comma-separated branches, tags, or revisions |
 | `--git-max-depth <COUNT>` | Limit reachable commits inspected |
@@ -145,6 +150,8 @@ Commit: a1b2c3d (Developer, 2025-02-24T00:00:00+00:00)
 
 Scan Summary:
 -------------
+Working tree: 14 files, 0 findings
+Git history: 1000 commits, 321 changed files, 1 finding
 Total findings: 1
   Critical: 1
   High:     0

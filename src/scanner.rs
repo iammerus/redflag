@@ -43,6 +43,7 @@ pub(crate) struct CommitMetadata {
 pub(crate) struct ScanStats {
     pub files: usize,
     pub findings: usize,
+    pub commits: usize,
 }
 
 #[derive(Debug)]
@@ -167,7 +168,11 @@ impl Scanner {
                 phase: "Working tree",
                 total: 1,
             })?;
-            return Ok(ScanStats { files: 1, findings });
+            return Ok(ScanStats {
+                files: 1,
+                findings,
+                commits: 0,
+            });
         }
 
         if !metadata.is_dir() {
