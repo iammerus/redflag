@@ -141,8 +141,8 @@ fn run_scan(
     if git_history {
         git_scanner::scan_git_history_with_handler(
             Path::new(&path),
-            &config,
-            show_secrets,
+            &scanner,
+            &config.git,
             &mut handler,
         )?;
     }

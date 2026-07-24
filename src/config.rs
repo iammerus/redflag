@@ -186,31 +186,6 @@ static DEFAULT_PATTERNS: Lazy<Vec<SecretPattern>> = Lazy::new(|| {
             description: "JWT token detected".to_string(),
             severity: Severity::High,
         },
-        // Sensitive file patterns
-        SecretPattern {
-            name: "Environment File".to_string(),
-            pattern: r"\.env(\.[a-zA-Z0-9]+)?$".to_string(),
-            description: "Environment file detected".to_string(),
-            severity: Severity::Medium,
-        },
-        SecretPattern {
-            name: "Private Key File".to_string(),
-            pattern: r"(?i)(id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.pem|.*\.key|.*\.pfx|.*\.p12)$".to_string(),
-            description: "Private key file detected".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Certificate File".to_string(),
-            pattern: r"(?i)(.*\.crt|.*\.cer|.*\.ca-bundle)$".to_string(),
-            description: "Certificate file detected".to_string(),
-            severity: Severity::Medium,
-        },
-        SecretPattern {
-            name: "Kubernetes Config".to_string(),
-            pattern: r"(?i)(kubeconfig|\.kube/config)$".to_string(),
-            description: "Kubernetes configuration file detected".to_string(),
-            severity: Severity::High,
-        },
     ]
 });
 

@@ -1,370 +1,123 @@
-use crate::error::RedflagError;
-use crate::scanner::calculate_shannon_entropy;
-use crate::scanner::finding_snippet;
-use crate::scanner::Detection;
-use crate::scanner::FindingHandler;
 use crate::{
-    config::{Config, Severity},
-    scanner::Finding,
+    config::GitConfig,
+    error::RedflagError,
+    scanner::{CommitMetadata, FindingHandler, ScanStats, Scanner},
 };
 use bstr::ByteSlice;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use git2::{Commit, Delta, DiffOptions, Repository, Tree};
-use indicatif::{ProgressBar, ProgressStyle};
-use once_cell::sync::Lazy;
-use regex::Regex;
-use std::collections::HashMap;
+use git2::{Commit, Delta, DiffOptions, Repository};
 use std::path::Path;
-use std::sync::Mutex;
-
-struct ScanCache {
-    commit_results: HashMap<String, Vec<Finding>>,
-}
-
-const MAX_CACHE_SIZE: usize = 1000; // Limit cache to last 1000 commits
-
-impl ScanCache {
-    fn new() -> Self {
-        ScanCache {
-            commit_results: HashMap::new(),
-        }
-    }
-
-    fn get(&self, commit_hash: &str) -> Option<&Vec<Finding>> {
-        self.commit_results.get(commit_hash)
-    }
-
-    fn insert(&mut self, commit_hash: String, findings: Vec<Finding>) {
-        // If cache is at max size, remove oldest entries
-        if self.commit_results.len() >= MAX_CACHE_SIZE {
-            let to_remove: Vec<_> = self
-                .commit_results
-                .keys()
-                .take(MAX_CACHE_SIZE / 2)
-                .cloned()
-                .collect();
-            for key in to_remove {
-                self.commit_results.remove(&key);
-            }
-        }
-        self.commit_results.insert(commit_hash, findings);
-    }
-}
-
-static SCAN_CACHE: Lazy<Mutex<ScanCache>> = Lazy::new(|| Mutex::new(ScanCache::new()));
 
 pub fn scan_git_history_with_handler<H: FindingHandler>(
     path: &Path,
-    config: &Config,
-    show_secrets: bool,
+    scanner: &Scanner,
+    config: &GitConfig,
     handler: &mut H,
-) -> Result<(), RedflagError> {
+) -> Result<ScanStats, RedflagError> {
     let repo = Repository::open(path)?;
     let mut revwalk = repo.revwalk()?;
 
-    // Parse date filters - convert to start/end of day
     let since_timestamp = config
-        .git
         .since_date
         .as_ref()
         .and_then(|date| {
-            NaiveDateTime::parse_from_str(&format!("{} 00:00:00", date), "%Y-%m-%d %H:%M:%S").ok()
+            NaiveDateTime::parse_from_str(&format!("{date} 00:00:00"), "%Y-%m-%d %H:%M:%S").ok()
         })
-        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).timestamp());
-
+        .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc).timestamp());
     let until_timestamp = config
-        .git
         .until_date
         .as_ref()
         .and_then(|date| {
-            NaiveDateTime::parse_from_str(&format!("{} 23:59:59", date), "%Y-%m-%d %H:%M:%S").ok()
+            NaiveDateTime::parse_from_str(&format!("{date} 23:59:59"), "%Y-%m-%d %H:%M:%S").ok()
         })
-        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).timestamp());
+        .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc).timestamp());
 
-    // Configure revwalk based on config
-    if !config.git.branches.is_empty() {
-        for branch in &config.git.branches {
+    if config.branches.is_empty() {
+        revwalk.push_head()?;
+    } else {
+        for branch in &config.branches {
             if let Ok(branch_ref) = repo.find_branch(branch, git2::BranchType::Local) {
-                if let Some(branch_ref_name) = branch_ref.get().name() {
-                    revwalk.push_ref(branch_ref_name)?;
+                if let Some(name) = branch_ref.get().name() {
+                    revwalk.push_ref(name)?;
                 }
             }
         }
-    } else {
-        revwalk.push_head()?;
     }
-
     revwalk.set_sorting(git2::Sort::TIME)?;
 
-    // Collect commits that match our criteria
-    let commits: Vec<_> = revwalk
-        .filter_map(Result::ok)
-        .filter_map(|oid| repo.find_commit(oid).ok())
-        .filter(|commit| should_process_commit(commit, since_timestamp, until_timestamp))
-        .take(config.git.max_depth)
-        .collect();
-
-    let commit_count = commits.len();
-    let progress = ProgressBar::new(commit_count as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} commits")?
-            .progress_chars("=>-"),
-    );
-
-    // Clear the cache for tests
-    #[cfg(test)]
-    {
-        let mut cache = SCAN_CACHE.lock().unwrap();
-        cache.commit_results.clear();
-    }
-
-    let mut cache = SCAN_CACHE.lock().unwrap();
-    let mut seen_findings = std::collections::HashSet::new();
-    let mut all_findings = Vec::new();
-
-    for commit in commits {
-        let commit_hash = commit.id().to_string();
-
-        // Check cache first
-        if let Some(cached_findings) = cache.get(&commit_hash) {
-            for finding in cached_findings {
-                let key = format!(
-                    "{}:{}:{}",
-                    finding.file.display(),
-                    finding.pattern_name,
-                    finding.snippet
-                );
-                if seen_findings.insert(key) {
-                    all_findings.push(finding.clone());
-                }
-            }
-        } else {
-            let mut findings = Vec::new();
-            process_commit(&repo, &commit, config, show_secrets, &mut findings);
-            for finding in &findings {
-                let key = format!(
-                    "{}:{}:{}",
-                    finding.file.display(),
-                    finding.pattern_name,
-                    finding.snippet
-                );
-                if seen_findings.insert(key) {
-                    all_findings.push(finding.clone());
-                }
-            }
-            cache.insert(commit_hash, findings);
+    let mut stats = ScanStats::default();
+    let mut inspected = 0;
+    for oid in revwalk {
+        let commit = repo.find_commit(oid?)?;
+        if !should_process_commit(&commit, since_timestamp, until_timestamp) {
+            continue;
         }
-
-        progress.inc(1);
+        if inspected == config.max_depth {
+            break;
+        }
+        let commit_stats = process_commit(&repo, &commit, scanner, handler)?;
+        stats.files += commit_stats.files;
+        stats.findings += commit_stats.findings;
+        inspected += 1;
     }
-
-    // Now handle all findings
-    for finding in all_findings {
-        handler.handle(finding)?;
-    }
-
-    progress.finish_with_message("Git history scan complete");
-    Ok(())
+    Ok(stats)
 }
 
-fn process_commit(
+fn process_commit<H: FindingHandler>(
     repo: &Repository,
     commit: &Commit,
-    config: &Config,
-    show_secrets: bool,
-    findings: &mut Vec<Finding>,
-) {
-    if let Ok(tree) = commit.tree() {
-        // Get parent commit to compare changes
-        let parent_tree = if commit.parent_count() > 0 {
-            commit.parent(0).ok().and_then(|parent| parent.tree().ok())
-        } else {
-            None
+    scanner: &Scanner,
+    handler: &mut H,
+) -> Result<ScanStats, RedflagError> {
+    let tree = commit.tree()?;
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0)?.tree()?)
+    } else {
+        None
+    };
+    let mut options = DiffOptions::new();
+    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
+    let metadata = CommitMetadata {
+        hash: commit.id().to_string(),
+        author: commit.author().to_string(),
+        date: DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0)
+            .map(|date| date.to_rfc3339())
+            .unwrap_or_else(|| commit.time().seconds().to_string()),
+    };
+
+    let mut stats = ScanStats::default();
+    for delta in diff.deltas() {
+        if delta.status() == Delta::Deleted {
+            continue;
+        }
+        let Some(path) = delta.new_file().path() else {
+            continue;
         };
+        if !scanner.should_scan_path(path) {
+            continue;
+        }
 
-        // Only analyze the diff between this commit and its parent
-        analyze_diff(
-            repo,
-            parent_tree.as_ref(),
-            Some(&tree),
-            commit,
-            config,
-            show_secrets,
-            findings,
-        );
-    }
-}
-
-fn analyze_diff(
-    repo: &Repository,
-    old_tree: Option<&Tree>,
-    new_tree: Option<&Tree>,
-    commit: &Commit,
-    config: &Config,
-    show_secrets: bool,
-    findings: &mut Vec<Finding>,
-) {
-    let mut diff_options = DiffOptions::new();
-    if let Ok(diff) = repo.diff_tree_to_tree(old_tree, new_tree, Some(&mut diff_options)) {
-        let _ = diff.foreach(
-            &mut |delta, _| {
-                // Only process new or modified files, skip deletions
-                if delta.status() != Delta::Deleted {
-                    if let Some(new_file) = delta.new_file().path() {
-                        process_file_diff(
-                            repo,
-                            delta,
-                            commit,
-                            config,
-                            show_secrets,
-                            findings,
-                            new_file,
-                        );
-                    }
-                }
-                true
-            },
-            None,
-            None,
-            None,
-        );
-    }
-}
-
-fn process_file_diff(
-    repo: &Repository,
-    delta: git2::DiffDelta<'_>,
-    commit: &Commit,
-    config: &Config,
-    show_secrets: bool,
-    findings: &mut Vec<Finding>,
-    file_path: &Path,
-) {
-    let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-    if !config
-        .extensions
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case(extension))
-    {
-        return;
-    }
-
-    let patch = delta.new_file().id();
-    if let Ok(blob) = repo.find_blob(patch) {
+        let blob = repo.find_blob(delta.new_file().id())?;
         let content = blob.content().to_str_lossy();
-        for (line_num, line) in content.lines().enumerate() {
-            check_line(
-                line,
-                line_num + 1,
-                file_path,
-                commit,
-                config,
-                show_secrets,
-                findings,
-            );
-        }
+        stats.findings +=
+            scanner.scan_content_with_handler(path, &content, Some(&metadata), handler)?;
+        stats.files += 1;
     }
-}
-
-fn check_line(
-    line: &str,
-    line_num: usize,
-    file_path: &Path,
-    commit: &Commit,
-    config: &Config,
-    show_secrets: bool,
-    findings: &mut Vec<Finding>,
-) {
-    // Check regex patterns
-    for pattern in &config.patterns {
-        if let Ok(re) = Regex::new(&pattern.pattern) {
-            if let Some(secret_match) = re.find(line) {
-                findings.push(create_finding(
-                    file_path,
-                    line_num,
-                    line,
-                    Detection {
-                        range: secret_match.range(),
-                        name: &pattern.name,
-                        description: &pattern.description,
-                        severity: pattern.severity,
-                    },
-                    commit,
-                    show_secrets,
-                ));
-            }
-        }
-    }
-
-    // Check entropy
-    if config.entropy.enabled {
-        let clean_line = line.replace(|c: char| !c.is_ascii_alphanumeric(), "");
-        if clean_line.len() >= config.entropy.min_length
-            && calculate_shannon_entropy(&clean_line) >= config.entropy.threshold
-        {
-            findings.push(create_finding(
-                file_path,
-                line_num,
-                line,
-                Detection {
-                    range: 0..line.len(),
-                    name: "high-entropy",
-                    description: "High entropy string detected",
-                    severity: Severity::Medium,
-                },
-                commit,
-                show_secrets,
-            ));
-        }
-    }
-}
-
-fn create_finding(
-    file_path: &Path,
-    line_num: usize,
-    line: &str,
-    detection: Detection<'_>,
-    commit: &Commit,
-    show_secrets: bool,
-) -> Finding {
-    Finding {
-        file: file_path.to_path_buf(),
-        line: line_num,
-        pattern_name: detection.name.to_string(),
-        description: detection.description.to_string(),
-        snippet: finding_snippet(line, detection.range, show_secrets),
-        severity: detection.severity,
-        commit_hash: Some(commit.id().to_string()),
-        commit_author: Some(commit.author().to_string()),
-        commit_date: DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0)
-            .map(|date| date.to_rfc3339()),
-    }
+    Ok(stats)
 }
 
 fn should_process_commit(commit: &Commit, since: Option<i64>, until: Option<i64>) -> bool {
     let commit_time = commit.time().seconds();
-
-    if let Some(since_time) = since {
-        if commit_time < since_time {
-            return false;
-        }
-    }
-
-    if let Some(until_time) = until {
-        if commit_time > until_time {
-            return false;
-        }
-    }
-
-    true
+    since.is_none_or(|start| commit_time >= start) && until.is_none_or(|end| commit_time <= end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EntropyConfig, GitConfig, SecretPattern};
+    use crate::{
+        config::{Config, EntropyConfig, GitConfig, SecretPattern, Severity},
+        scanner::Finding,
+    };
     use git2::{Repository, Signature};
     use std::fs::{self, File};
     use std::io::Write;
@@ -387,6 +140,15 @@ mod tests {
             self.findings.push(finding);
             Ok(())
         }
+    }
+
+    fn scan(
+        path: &Path,
+        config: &Config,
+        handler: &mut TestHandler,
+    ) -> Result<ScanStats, RedflagError> {
+        let scanner = Scanner::with_config(config.clone());
+        scan_git_history_with_handler(path, &scanner, &config.git, handler)
     }
 
     fn create_test_repo_for_secrets() -> (tempfile::TempDir, Repository) {
@@ -496,7 +258,7 @@ mod tests {
             },
         };
 
-        scan_git_history_with_handler(dir.path(), &config, false, &mut handler)?;
+        scan(dir.path(), &config, &mut handler)?;
 
         assert_eq!(handler.findings.len(), 2, "Expected to find 2 secrets");
 
@@ -543,7 +305,7 @@ mod tests {
             ..Config::default()
         };
 
-        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
+        scan(dir.path(), &config, &mut handler).unwrap();
         assert_eq!(
             handler.findings.len(),
             0,
@@ -569,7 +331,7 @@ mod tests {
             ..Config::default()
         };
 
-        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
+        scan(dir.path(), &config, &mut handler).unwrap();
         assert!(
             !handler.findings.is_empty(),
             "Should find secrets in current date range"
@@ -577,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_management() {
+    fn repeated_scans_are_consistent() {
         let (dir, _repo) = create_test_repo_for_secrets();
         let mut handler = TestHandler::new();
         let config = Config {
@@ -591,18 +353,77 @@ mod tests {
             ..Config::default()
         };
 
-        // First scan should populate cache
-        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
+        scan(dir.path(), &config, &mut handler).unwrap();
         let first_count = handler.findings.len();
 
-        // Second scan should use cache
         let mut handler = TestHandler::new();
-        scan_git_history_with_handler(dir.path(), &config, false, &mut handler).unwrap();
+        scan(dir.path(), &config, &mut handler).unwrap();
         let second_count = handler.findings.len();
 
         assert_eq!(
             first_count, second_count,
-            "Cache should provide consistent results"
+            "Repeated scans should provide consistent results"
         );
+    }
+
+    #[test]
+    fn working_tree_and_history_use_the_same_detector() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        fs::write(
+            dir.path().join("secret.rs"),
+            "// redflag-ignore-next\napi_key = \"ignored_value_12345678901234567890\"\n\
+             api_key = \"reported_value_1234567890123456789\"\n",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("secret.rs")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Add secret",
+            &tree,
+            &[],
+        )
+        .unwrap();
+
+        let config = Config {
+            patterns: vec![SecretPattern {
+                name: "api-key".to_string(),
+                pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),
+                description: "API key detected".to_string(),
+                severity: Severity::High,
+            }],
+            extensions: vec!["rs".to_string()],
+            exclusions: Vec::new(),
+            entropy: EntropyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            git: GitConfig {
+                branches: Vec::new(),
+                ..Default::default()
+            },
+        };
+        let scanner = Scanner::with_config(config.clone());
+        let mut working = TestHandler::new();
+        scanner
+            .scan_with_handler(dir.path().to_str().unwrap(), &mut working)
+            .unwrap();
+        let mut history = TestHandler::new();
+        scan_git_history_with_handler(dir.path(), &scanner, &config.git, &mut history).unwrap();
+
+        assert_eq!(working.findings.len(), 1);
+        assert_eq!(history.findings.len(), 1);
+        let working = &working.findings[0];
+        let history = &history.findings[0];
+        assert_eq!(working.pattern_name, history.pattern_name);
+        assert_eq!(working.description, history.description);
+        assert_eq!(working.severity, history.severity);
+        assert_eq!(working.snippet, history.snippet);
     }
 }
