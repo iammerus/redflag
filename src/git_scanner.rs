@@ -151,6 +151,7 @@ fn process_commit<H: FindingHandler>(
                 stats.findings += scanner.scan_line_with_handler(
                     ContentLine {
                         path,
+                        policy_path: path,
                         number: line.new_lineno().unwrap_or(0) as usize,
                         content,
                         commit: Some(&metadata),

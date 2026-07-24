@@ -435,6 +435,73 @@ policy = "{last_policy}"
 }
 
 #[test]
+fn exclusions_use_scan_root_relative_paths() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("docs/examples/secret.rs"));
+    let config = dir.path().join("redflag.toml");
+    fs::write(
+        &config,
+        r#"
+[[exclusions]]
+pattern = "docs/examples/**"
+policy = "Ignore"
+"#,
+    )
+    .unwrap();
+
+    let absolute = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+    let relative = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .current_dir(dir.path())
+        .args(["scan", ".", "--config", config.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert_eq!(absolute.status.code(), Some(0));
+    assert_eq!(relative.status.code(), Some(0));
+}
+
+#[test]
+fn allowed_child_is_visited_inside_ignored_parent() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("private/blocked/secret.rs"));
+    write_secret(&dir.path().join("private/allowed/secret.rs"));
+    let config = dir.path().join("redflag.toml");
+    fs::write(
+        &config,
+        r#"
+[[exclusions]]
+pattern = "private/**"
+policy = "Ignore"
+
+[[exclusions]]
+pattern = "private/allowed/**"
+policy = "ScanButAllow"
+"#,
+    )
+    .unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0]["file"]
+        .as_str()
+        .unwrap()
+        .contains("private/allowed/secret.rs"));
+}
+
+#[test]
 fn scan_but_warn_uses_stderr() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join("warning.rs"));

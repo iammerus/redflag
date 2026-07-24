@@ -74,6 +74,7 @@ pub struct Scanner {
 #[derive(Debug, Clone)]
 struct ExclusionRule {
     pattern: Pattern,
+    literal_prefix: String,
     policy: ExclusionPolicy,
 }
 
@@ -86,6 +87,7 @@ pub(crate) struct Detection<'a> {
 
 pub(crate) struct ContentLine<'a> {
     pub path: &'a Path,
+    pub policy_path: &'a Path,
     pub number: usize,
     pub content: &'a str,
     pub commit: Option<&'a CommitMetadata>,
@@ -126,6 +128,14 @@ impl Scanner {
                 Ok(ExclusionRule {
                     pattern: Pattern::new(&rule.pattern)
                         .map_err(|error| RedflagError::Config(error.to_string()))?,
+                    literal_prefix: rule
+                        .pattern
+                        .split(['*', '?', '[', '{'])
+                        .next()
+                        .unwrap_or_default()
+                        .trim_start_matches("./")
+                        .trim_end_matches('/')
+                        .replace('\\', "/"),
                     policy: rule.policy,
                 })
             })
@@ -157,13 +167,14 @@ impl Scanner {
         })?;
 
         if metadata.is_file() {
+            let policy_path = path.file_name().map(Path::new).unwrap_or(path);
             handler.progress(ScanProgress::Item {
                 phase: "Working tree",
                 current: 1,
                 total: 1,
                 detail: path.display().to_string(),
             })?;
-            let findings = self.scan_file(path, handler)?;
+            let findings = self.scan_file(path, policy_path, handler)?;
             handler.progress(ScanProgress::Finished {
                 phase: "Working tree",
                 total: 1,
@@ -184,30 +195,37 @@ impl Scanner {
         })?;
         let mut files_to_scan = Vec::new();
         for entry in WalkDir::new(path).into_iter().filter_entry(|entry| {
-            !entry.file_type().is_dir()
-                || entry.path() == path
-                || self.file_policy(entry.path()) != ExclusionPolicy::Ignore
+            if !entry.file_type().is_dir() || entry.path() == path {
+                return true;
+            }
+            let relative = entry.path().strip_prefix(path).unwrap_or(entry.path());
+            self.should_descend(relative)
         }) {
             let entry = entry?;
+            let relative = entry
+                .path()
+                .strip_prefix(path)
+                .unwrap_or(entry.path())
+                .to_path_buf();
             if entry.file_type().is_file()
-                && self.file_policy(entry.path()) != ExclusionPolicy::Ignore
+                && self.file_policy(&relative, false) != ExclusionPolicy::Ignore
                 && self.should_scan_path(entry.path())
             {
-                files_to_scan.push(entry.into_path());
+                files_to_scan.push((entry.into_path(), relative));
             }
         }
-        files_to_scan.sort();
+        files_to_scan.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut stats = ScanStats::default();
         let total = files_to_scan.len();
-        for (index, file_path) in files_to_scan.into_iter().enumerate() {
+        for (index, (file_path, policy_path)) in files_to_scan.into_iter().enumerate() {
             handler.progress(ScanProgress::Item {
                 phase: "Working tree",
                 current: index + 1,
                 total,
                 detail: file_path.display().to_string(),
             })?;
-            stats.findings += self.scan_file(&file_path, handler)?;
+            stats.findings += self.scan_file(&file_path, &policy_path, handler)?;
             stats.files += 1;
         }
         handler.progress(ScanProgress::Finished {
@@ -217,17 +235,36 @@ impl Scanner {
         Ok(stats)
     }
 
-    pub(crate) fn file_policy(&self, path: &Path) -> ExclusionPolicy {
-        let path_str = path.to_string_lossy();
-        self.exclusions
-            .iter()
-            .rev()
-            .find(|r| {
-                r.pattern.matches(&path_str)
-                    || (path.is_dir() && r.pattern.matches(&format!("{path_str}/")))
-            })
-            .map(|r| r.policy)
+    pub(crate) fn file_policy(&self, path: &Path, is_dir: bool) -> ExclusionPolicy {
+        self.matching_exclusion(path, is_dir)
+            .map(|(_, rule)| rule.policy)
             .unwrap_or(ExclusionPolicy::ScanButAllow)
+    }
+
+    fn matching_exclusion(&self, path: &Path, is_dir: bool) -> Option<(usize, &ExclusionRule)> {
+        let path = normalised_path(path);
+        self.exclusions.iter().enumerate().rev().find(|(_, rule)| {
+            rule.pattern.matches(&path) || (is_dir && rule.pattern.matches(&format!("{path}/")))
+        })
+    }
+
+    fn should_descend(&self, path: &Path) -> bool {
+        let Some((index, rule)) = self.matching_exclusion(path, true) else {
+            return true;
+        };
+        if rule.policy != ExclusionPolicy::Ignore {
+            return true;
+        }
+
+        let directory = normalised_path(path);
+        self.exclusions[index + 1..].iter().any(|later| {
+            if later.policy == ExclusionPolicy::Ignore || later.literal_prefix.is_empty() {
+                return later.policy != ExclusionPolicy::Ignore;
+            }
+            later.literal_prefix == directory
+                || later.literal_prefix.starts_with(&format!("{directory}/"))
+                || directory.starts_with(&format!("{}/", later.literal_prefix))
+        })
     }
 
     pub(crate) fn should_scan_path(&self, path: &Path) -> bool {
@@ -245,23 +282,25 @@ impl Scanner {
     fn scan_file<H: FindingHandler>(
         &self,
         path: &Path,
+        policy_path: &Path,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
         let content = fs::read_to_string(path).map_err(|source| RedflagError::PathIo {
             path: path.to_path_buf(),
             source,
         })?;
-        self.scan_content_with_handler(path, &content, None, handler)
+        self.scan_content(path, policy_path, &content, None, handler)
     }
 
-    pub(crate) fn scan_content_with_handler<H: FindingHandler>(
+    fn scan_content<H: FindingHandler>(
         &self,
         path: &Path,
+        policy_path: &Path,
         content: &str,
         commit: Option<&CommitMetadata>,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let policy = self.file_policy(path);
+        let policy = self.file_policy(policy_path, false);
         if policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
@@ -272,6 +311,7 @@ impl Scanner {
             findings_count += self.scan_line_with_handler(
                 ContentLine {
                     path,
+                    policy_path,
                     number: line_num + 1,
                     content: line,
                     commit,
@@ -290,7 +330,7 @@ impl Scanner {
         state: &mut SuppressionState,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let policy = self.file_policy(input.path);
+        let policy = self.file_policy(input.policy_path, false);
         let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
         if !input.emit_findings || policy == ExclusionPolicy::Ignore {
             return Ok(0);
@@ -440,6 +480,17 @@ fn merged_ranges(ranges: impl Iterator<Item = Range<usize>>) -> Vec<Range<usize>
     merged
 }
 
+fn normalised_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            std::path::Component::ParentDir => Some("..".to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {
     let mut candidates = Vec::new();
     for quote in ['"', '\''] {
@@ -509,7 +560,7 @@ pub(crate) fn calculate_shannon_entropy(s: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SecretPattern;
+    use crate::config::{ExclusionRule as ConfigExclusionRule, SecretPattern};
 
     #[derive(Default)]
     struct TestHandler {
@@ -641,6 +692,31 @@ mod tests {
         let repeated = format!(r#"api_key="{first}"; api_key="{second}""#);
         let findings = scanner.scan_line(Path::new("test.rs"), 1, &repeated, &mut state, None);
         assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn descendant_exclusion_can_override_ignored_parent() {
+        let scanner = Scanner::with_config(Config {
+            exclusions: vec![
+                ConfigExclusionRule {
+                    pattern: "private/**".to_string(),
+                    policy: ExclusionPolicy::Ignore,
+                },
+                ConfigExclusionRule {
+                    pattern: "private/allowed/**".to_string(),
+                    policy: ExclusionPolicy::ScanButAllow,
+                },
+            ],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(scanner.should_descend(Path::new("private")));
+        assert!(scanner.should_descend(Path::new("private/allowed")));
+        assert_eq!(
+            scanner.file_policy(Path::new("private/allowed/secret.rs"), false),
+            ExclusionPolicy::ScanButAllow
+        );
     }
 
     #[test]
