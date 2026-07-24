@@ -489,3 +489,21 @@ fn unreadable_file_is_an_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains(path.to_str().unwrap()));
 }
+
+#[cfg(unix)]
+#[test]
+fn json_input_error_leaves_stdout_empty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("a.rs"));
+    let unreadable = dir.path().join("b.rs");
+    fs::write(&unreadable, "clean\n").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = redflag_with_args(&["scan", dir.path().to_str().unwrap(), "--format", "json"]);
+
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}

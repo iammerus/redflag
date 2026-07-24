@@ -22,8 +22,8 @@ pub enum OutputFormat {
 pub struct OutputHandler {
     format: OutputFormat,
     findings_count: usize,
-    first_finding: bool,
     writer: Box<dyn Write>,
+    json_findings: Vec<Finding>,
     findings_by_severity: HashMap<Severity, usize>,
     progress_writer: Box<dyn Write>,
     progress_enabled: bool,
@@ -59,8 +59,8 @@ impl OutputHandler {
         Self {
             format,
             findings_count: 0,
-            first_finding: true,
             writer,
+            json_findings: Vec::new(),
             findings_by_severity: HashMap::new(),
             progress_writer,
             progress_enabled,
@@ -191,8 +191,10 @@ impl OutputHandler {
     ) -> Result<(), RedflagError> {
         self.clear_progress();
         match self.format {
-            OutputFormat::Json if self.first_finding => writeln!(self.writer, "[]")?,
-            OutputFormat::Json => writeln!(self.writer, "\n]")?,
+            OutputFormat::Json => {
+                serde_json::to_writer_pretty(&mut self.writer, &self.json_findings)?;
+                writeln!(self.writer)?;
+            }
             OutputFormat::Text => {
                 if self.findings_count == 0 {
                     writeln!(self.writer, "No secrets found!")?;
@@ -268,10 +270,11 @@ impl OutputHandler {
 
 impl FindingHandler for OutputHandler {
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
-        let redraw_progress = self.progress_line.is_some();
-        self.clear_rendered_progress();
+        let severity = finding.severity;
         match self.format {
             OutputFormat::Text => {
+                let redraw_progress = self.progress_line.is_some();
+                self.clear_rendered_progress();
                 writeln!(
                     self.writer,
                     "[{}] {}:{} - {} - {}\nSnippet: {}{}\n",
@@ -283,27 +286,18 @@ impl FindingHandler for OutputHandler {
                     finding.snippet,
                     Self::format_commit_info(&finding)
                 )?;
+                self.writer.flush()?;
+                if redraw_progress {
+                    self.draw_progress(true);
+                }
             }
             OutputFormat::Json => {
-                if self.first_finding {
-                    writeln!(self.writer, "[")?;
-                } else {
-                    writeln!(self.writer, ",")?;
-                }
-                serde_json::to_writer_pretty(&mut self.writer, &finding)?;
-                self.first_finding = false;
+                self.json_findings.push(finding);
             }
         }
 
         self.findings_count += 1;
-        *self
-            .findings_by_severity
-            .entry(finding.severity)
-            .or_insert(0) += 1;
-        self.writer.flush()?;
-        if redraw_progress {
-            self.draw_progress(true);
-        }
+        *self.findings_by_severity.entry(severity).or_insert(0) += 1;
         Ok(())
     }
 
