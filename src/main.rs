@@ -41,16 +41,16 @@ enum Commands {
         #[arg(long)]
         git_history: bool,
 
-        #[arg(long)]
+        #[arg(long, requires = "git_history")]
         git_max_depth: Option<usize>,
 
-        #[arg(long)]
+        #[arg(long, requires = "git_history")]
         git_since: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, requires = "git_history")]
         git_until: Option<String>,
 
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', requires = "git_history")]
         git_branches: Option<Vec<String>>,
     },
     /// Generate default configuration file

@@ -344,6 +344,24 @@ fn missing_git_revision_is_an_error() {
 }
 
 #[test]
+fn git_options_require_history_scanning() {
+    let dir = tempdir().unwrap();
+    for arguments in [
+        vec!["--git-max-depth", "10"],
+        vec!["--git-since", "2026-01-01"],
+        vec!["--git-until", "2026-12-31"],
+        vec!["--git-branches", "missing"],
+    ] {
+        let mut command = vec!["scan", dir.path().to_str().unwrap()];
+        command.extend(arguments);
+        let output = redflag_with_args(&command);
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--git-history"));
+    }
+}
+
+#[test]
 fn closed_output_pipe_is_an_error() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join(".env"));
