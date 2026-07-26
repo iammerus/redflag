@@ -573,6 +573,11 @@ fn is_known_extensionless_file(path: &Path) -> bool {
                 | "Containerfile"
                 | "Makefile"
                 | "Jenkinsfile"
+                | "credentials"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ecdsa"
+                | "id_ed25519"
         )
     )
 }

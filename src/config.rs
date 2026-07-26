@@ -208,6 +208,17 @@ fn default_extensions() -> Vec<String> {
         "sql".to_string(),
         "md".to_string(),
         "txt".to_string(),
+        "sh".to_string(),
+        "bash".to_string(),
+        "zsh".to_string(),
+        "tf".to_string(),
+        "tfvars".to_string(),
+        "hcl".to_string(),
+        "pem".to_string(),
+        "key".to_string(),
+        "map".to_string(),
+        "mjs".to_string(),
+        "cjs".to_string(),
     ]
 }
 
@@ -228,10 +239,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
         },
         ExclusionRule {
             pattern: "**/target/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/dist/**".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
         // Additional package manager folders
@@ -271,23 +278,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/.bundle/**".to_string(), // Ruby bundle
             policy: ExclusionPolicy::Ignore,
         },
-        // Build directories
-        ExclusionRule {
-            pattern: "**/build/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/out/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/.next/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/.nuxt/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
         // Other common directories to ignore
         ExclusionRule {
             pattern: "**/coverage/**".to_string(),
@@ -303,10 +293,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
         },
         ExclusionRule {
             pattern: "**/.cache/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/*.min.js".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
     ]

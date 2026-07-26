@@ -1,5 +1,6 @@
 //! Generated, offline detection fixtures. No provider-issued credentials.
 //! Check each file and rule, so duplicates cannot hide a missed credential.
+use git2::{Repository, Signature};
 use serde_json::Value;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
@@ -159,6 +160,58 @@ fn generic_credentials_support_assignment_syntax_and_hex_without_lowering_entrop
 }
 
 #[test]
+fn build_outputs_and_credential_files_are_scanned_in_working_tree_and_history() {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let value = format!("ghp_{}", token_body(36));
+    let paths = [
+        "deploy.sh",
+        "infra.tf",
+        "secrets.tfvars",
+        "credentials",
+        "id_ed25519",
+        "client.pem",
+        "client.key",
+        "dist/assets/app.min.js",
+        "build/app.js",
+        "out/app.mjs",
+        ".next/static/app.js",
+        ".nuxt/app.js",
+        "app.js.map",
+    ];
+    let mut index = repo.index().unwrap();
+    for path in paths {
+        let destination = dir.path().join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, format!("window.config={{payload:`{value}`}};")).unwrap();
+        index.add_path(Path::new(path)).unwrap();
+    }
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let author = Signature::now("Fixture Author", "fixture@example.org").unwrap();
+    let commit = repo
+        .commit(Some("HEAD"), &author, &author, "Add fixtures", &tree, &[])
+        .unwrap();
+    let (_, findings) = scan(dir.path(), None, true);
+    assert_eq!(findings.len(), paths.len() * 2);
+    for path in paths {
+        let matches: Vec<_> = findings
+            .iter()
+            .filter(|finding| Path::new(finding["file"].as_str().unwrap()).ends_with(path))
+            .collect();
+        assert_eq!(matches.len(), 2, "{path}");
+        assert!(matches
+            .iter()
+            .any(|finding| finding["commit_hash"].is_null()));
+        assert!(matches
+            .iter()
+            .any(|finding| finding["commit_hash"] == commit.to_string()));
+        assert!(matches
+            .iter()
+            .all(|finding| finding["pattern_name"] == "GitHub Token"));
+    }
+}
+
+#[test]
 fn fallback_literals_and_mixed_interpolation_are_not_treated_as_references() {
     let dir = tempdir().unwrap();
     let config = entropy_off(dir.path());
@@ -214,4 +267,41 @@ fn fixed_length_provider_matches_do_not_accept_truncated_tokens() {
     let (_, findings) = scan(dir.path(), Some(&config), false);
     assert_eq!(findings.len(), 2);
     assert!(!serde_json::to_string(&findings).unwrap().contains(&token));
+}
+
+#[test]
+fn private_key_headers_and_netrc_passwords_have_explicit_coverage() {
+    let dir = tempdir().unwrap();
+    for (index, kind) in ["", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "]
+        .iter()
+        .enumerate()
+    {
+        fs::write(
+            dir.path().join(format!("key-{index}.pem")),
+            format!("-----BEGIN {kind}PRIVATE KEY-----\n"),
+        )
+        .unwrap();
+    }
+    let password = token_body(18);
+    fs::write(
+        dir.path().join(".netrc"),
+        format!("machine example.org login user password {password}\n"),
+    )
+    .unwrap();
+    let (_, findings) = scan(dir.path(), None, false);
+    assert_eq!(findings.len(), 6);
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding["pattern_name"] == "Private Key")
+            .count(),
+        5
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding["pattern_name"] == "Netrc Password")
+            .count(),
+        1
+    );
 }
