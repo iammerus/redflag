@@ -419,9 +419,27 @@ impl Scanner {
             return Vec::new();
         }
 
-        let mut detections = Vec::new();
+        let mut detections: Vec<Detection<'_>> = Vec::new();
+        let mut builtin_indices: Vec<usize> = Vec::new();
         for pattern in &self.patterns {
             for range in pattern.ranges(line, path) {
+                // Keep independent values on a line, but report a literal only
+                // once when several built-in rules recognize the same value.
+                if pattern.builtin {
+                    if let Some(index) = builtin_indices
+                        .iter()
+                        .find(|&&index| detections[index].range == range)
+                    {
+                        let previous = &mut detections[*index];
+                        if severity_rank(pattern.rule.severity) < severity_rank(previous.severity) {
+                            previous.name = &pattern.rule.name;
+                            previous.description = &pattern.rule.description;
+                            previous.severity = pattern.rule.severity;
+                        }
+                        continue;
+                    }
+                    builtin_indices.push(detections.len());
+                }
                 detections.push(Detection {
                     range,
                     name: &pattern.rule.name,
@@ -433,6 +451,14 @@ impl Scanner {
 
         if self.entropy_config.enabled && !is_lockfile(path) {
             for candidate in extract_entropy_candidates(line, self.entropy_config.min_length) {
+                if detections.iter().any(|item| {
+                    item.range.start <= candidate.start && item.range.end >= candidate.end
+                }) || is_checksum_context(&line[..candidate.start])
+                    || is_reference(&line[candidate.clone()])
+                    || is_publishable_key(&line[candidate.clone()])
+                {
+                    continue;
+                }
                 if calculate_shannon_entropy(&line[candidate.clone()])
                     >= self.entropy_config.threshold
                 {
@@ -582,6 +608,15 @@ fn is_known_extensionless_file(path: &Path) -> bool {
     )
 }
 
+fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Critical => 0,
+        Severity::High => 1,
+        Severity::Medium => 2,
+        Severity::Low => 3,
+    }
+}
+
 fn is_quoted(value: &str) -> bool {
     value.len() >= 2
         && matches!(value.as_bytes()[0], b'"' | b'\'' | b'`')
@@ -629,6 +664,14 @@ fn is_publishable_key(value: &str) -> bool {
         .is_some_and(|suffix| {
             suffix.len() >= 24 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
+}
+
+fn is_checksum_context(prefix: &str) -> bool {
+    static CHECKSUM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)\b(?:sha(?:1|224|256|384|512)|md5|checksum|digest|integrity)["'`]?\s*[:=]\s*["'`]?$"#)
+            .unwrap()
+    });
+    CHECKSUM.is_match(prefix)
 }
 
 fn token_boundary(line: &str, range: &Range<usize>) -> bool {
@@ -723,16 +766,21 @@ fn valid_builtin(name: &str, line: &str, range: &Range<usize>, quoted: bool, pat
 
 fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {
     let mut candidates = Vec::new();
-    for quote in ['"', '\''] {
+    for quote in ['"', '\'', '`'] {
         let mut offset = 0;
         while let Some(open) = line[offset..].find(quote).map(|index| offset + index) {
             let value_start = open + quote.len_utf8();
-            let Some(close) = line[value_start..]
-                .find(quote)
-                .map(|index| value_start + index)
-            else {
+            let mut close = value_start;
+            while close < line.len() {
+                match line.as_bytes()[close] {
+                    b'\\' => close += 2,
+                    byte if byte == quote as u8 => break,
+                    _ => close += 1,
+                }
+            }
+            if close >= line.len() {
                 break;
-            };
+            }
             if is_entropy_token(&line[value_start..close], min_length) {
                 candidates.push(value_start..close);
             }

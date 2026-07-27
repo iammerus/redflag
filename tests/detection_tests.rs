@@ -212,6 +212,36 @@ fn build_outputs_and_credential_files_are_scanned_in_working_tree_and_history() 
 }
 
 #[test]
+fn benign_references_checksums_and_publishable_keys_stay_clean() {
+    let dir = tempdir().unwrap();
+    let checksum = format!("{}+/=", token_body(43));
+    let public_key = format!("pk_live_{}", token_body(40));
+    let password_field = "password";
+    let source = [
+        assignment(2, password_field, "${DATABASE_PASSWORD}"),
+        assignment(4, password_field, "${DATABASE_PASSWORD}"),
+        assignment(1, password_field, "YOUR_PASSWORD_HERE"),
+        assignment(1, "api_key", &"0".repeat(40)),
+        assignment(2, "sha256", &checksum),
+        assignment(4, "integrity", &checksum),
+        assignment(2, "api_key", &public_key),
+        assignment(2, "value", &public_key),
+        "password = os.environ[\"DATABASE_PASSWORD\"]".to_string(),
+        "password = var.database_password".to_string(),
+        "password: config.password".to_string(),
+        "password: ${{ secrets.DATABASE_PASSWORD }}".to_string(),
+        "db = \"postgresql://localhost:5432/app\"".to_string(),
+        "db = \"mongodb+srv://user@cluster.example.org/app\"".to_string(),
+        "db = \"postgres://user:${DATABASE_PASSWORD}@host/app\"".to_string(),
+        "Documentation explains password authentication.".to_string(),
+    ]
+    .join("\n");
+    fs::write(dir.path().join("settings.txt"), source).unwrap();
+    let (code, findings) = scan(dir.path(), None, false);
+    assert_eq!(code, 0, "{findings:?}");
+}
+
+#[test]
 fn fallback_literals_and_mixed_interpolation_are_not_treated_as_references() {
     let dir = tempdir().unwrap();
     let config = entropy_off(dir.path());
@@ -267,6 +297,29 @@ fn fixed_length_provider_matches_do_not_accept_truncated_tokens() {
     let (_, findings) = scan(dir.path(), Some(&config), false);
     assert_eq!(findings.len(), 2);
     assert!(!serde_json::to_string(&findings).unwrap().contains(&token));
+}
+
+#[test]
+fn checksum_labels_do_not_hide_provider_tokens_and_custom_rules_keep_their_semantics() {
+    let dir = tempdir().unwrap();
+    let token = format!("ghp_{}", token_body(36));
+    fs::write(
+        dir.path().join("settings.txt"),
+        assignment(2, "sha256", &token),
+    )
+    .unwrap();
+    let (_, findings) = scan(dir.path(), None, false);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["pattern_name"], "GitHub Token");
+
+    let config = dir.path().join("redflag.toml");
+    fs::write(&config, "[entropy]\nenabled = false\n[[patterns]]\nname = \"Generic API Key\"\npattern = '(?P<secret>0{40})'\ndescription = \"Custom policy\"\n").unwrap();
+    let input = dir.path().join("custom.txt");
+    fs::write(&input, "0".repeat(40)).unwrap();
+    let (_, findings) = scan(&input, Some(&config), false);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["pattern_name"], "Generic API Key");
+    assert_eq!(findings[0]["snippet"], "[REDACTED]");
 }
 
 #[test]
