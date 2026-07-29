@@ -1,11 +1,12 @@
 # Extensions extend the built-in list and are deduplicated.
-extensions = ["tf", "hcl"]
+# Shell, Terraform, PEM/key, and JavaScript build artifacts are built in.
+extensions = ["kt"]
 
 # Present scalar sections replace their defaults.
 [entropy]
 enabled = true
-threshold = 3.8
-min_length = 24
+threshold = 4.8
+min_length = 30
 
 # Exclusions extend the built-in list. The last matching rule wins.
 [[exclusions]]
@@ -16,23 +17,20 @@ policy = "Ignore"
 pattern = "**/test-fixtures/**"
 policy = "ScanButAllow"
 
+# This policy intentionally allows findings without failing CI.
 [[exclusions]]
 pattern = "docs/examples/**"
 policy = "ScanButWarn"
 
+# Stripe secret/restricted keys are already built in.
+# Use a named secret capture to redact only the credential value.
 [[patterns]]
-name = "stripe-key"
-pattern = '''(?i)stripe_(secret|live)_key\s*=\s*['"]?(sk_(live|test)_[a-zA-Z0-9]{24})'''
-description = "Stripe Secret Key"
-severity = "Critical"
-
-# A pattern with a built-in name replaces that rule.
-[[patterns]]
-name = "JWT Token"
-pattern = '''(?i)eyJ[a-zA-Z0-9_-]{5,}\.eyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{10,}'''
-description = "JWT Token"
+name = "internal-service-token"
+pattern = '''service_token\s*=\s*"(?P<secret>[A-Za-z0-9_-]{32,})"'''
+description = "Internal service token"
 severity = "High"
 
+# A custom pattern with a built-in name replaces that rule's matching semantics.
 # An empty revision list scans HEAD.
 [git]
 max_depth = 1000

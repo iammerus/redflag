@@ -58,6 +58,29 @@ The action accepts optional `path` and `config` inputs. It builds the selected
 Redflag revision with stable Rust, redacts secrets by default, and fails when
 findings are present.
 
+Run the action after the build step to include generated assets. Directory scans
+now include `dist`, `build`, `out`, `.next`, `.nuxt`, minified JavaScript, and source
+maps. Dependency folders and caches remain excluded. Review existing custom
+exclusions if these files were previously ignored in your configuration.
+
+## Detection coverage
+
+Known GitHub, AWS access ID, Stripe secret/restricted, and npm token formats are
+recognized anywhere on a line, including unnamed values in compiled JavaScript.
+GitHub classic and fine-grained tokens are supported. Provider rules run even
+when entropy checks are disabled; they do not verify whether a credential is live.
+
+Credential assignments support JSON, YAML, shell, TOML, and common source syntax,
+including single quotes, double quotes, backticks, and unquoted values. API-key
+assignments recognize hexadecimal and base64 values without lowering the global
+entropy threshold. Password rules recognize literal fallbacks, including shell
+defaults and JavaScript `||`/`??` expressions.
+
+Built-in validation excludes plain environment references, explicit template
+placeholders, and Stripe publishable keys. Database URL findings require a
+password. Entropy checks skip labeled checksums; provider rules still run on
+those values. Overlapping built-in rules for the same literal produce one finding.
+
 ## Process contract
 
 | Exit code | Meaning |
@@ -103,7 +126,8 @@ explicit revision must resolve or the scan exits with code `2`.
 An explicitly named regular file is scanned regardless of its extension.
 Directory scans use the configured extensions and recognise `.env` and names
 such as `.env.local`. Common extensionless configuration files including
-`.npmrc`, `.netrc`, `Dockerfile`, `Makefile`, and `Jenkinsfile` are also
+`.npmrc`, `.netrc`, `credentials`, SSH private key names such as `id_ed25519`,
+`Dockerfile`, `Makefile`, and `Jenkinsfile` are also
 recognised. Test, example, fixture, and documentation files are not implicitly
 skipped.
 
@@ -132,7 +156,7 @@ Configuration is merged with built-in defaults as follows:
 Example:
 
 ```toml
-extensions = ["tf", "hcl"]
+extensions = ["kt"]
 
 [entropy]
 enabled = false
@@ -144,10 +168,10 @@ max_depth = 1000
 branches = []
 
 [[patterns]]
-name = "stripe-key"
-pattern = '''(?i)sk_(test|live)_[a-z0-9]{24}'''
-description = "Stripe API key"
-severity = "Critical"
+name = "internal-service-token"
+pattern = '''service_token\s*=\s*"(?P<secret>[A-Za-z0-9_-]{32,})"'''
+description = "Internal service token"
+severity = "High"
 
 [[exclusions]]
 pattern = "**/generated/**"
@@ -198,11 +222,15 @@ redflag scan . --git-history --format json > redflag-results.json
 | --- | --- |
 | Languages | `php`, `js`, `ts`, `jsx`, `tsx`, `py`, `rb`, `java`, `go`, `rs`, `cs`, `cpp`, `c`, `h`, `hpp` |
 | Data and configuration | `xml`, `yaml`, `yml`, `json`, `config`, `conf`, `ini`, `env`, `properties`, `toml`, `sql`, `md`, `txt` |
+| Shell and infrastructure | `sh`, `bash`, `zsh`, `tf`, `tfvars`, `hcl` |
+| Credentials and build artifacts | `pem`, `key`, `mjs`, `cjs`, `map` |
 
 ## Limits
 
 - Entropy detection is heuristic. It can miss secrets and report harmless
   strings.
+- Scanning is line based. Encoded, split, or dynamically constructed credentials
+  may be missed. Unknown opaque values still depend on heuristics or custom rules.
 - A clean scan is not a security guarantee.
 - Finding a committed secret does not make it safe again. Revoke or rotate it
   first.
@@ -216,5 +244,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release
 ```
+
+`tests/detection_tests.rs` generates offline fixtures for provider formats,
+assignment syntax, file selection, history, redaction, and benign lookalikes.
+These tests run with the normal CI suite. They measure regression coverage,
+not the probability of finding every secret in a real repository.
 
 Redflag is available under the MIT licence.

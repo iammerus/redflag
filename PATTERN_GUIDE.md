@@ -1,189 +1,81 @@
-# Pattern Guide for Redflag
+# Pattern guide
 
-This guide explains how to contribute new patterns to Redflag and outlines best practices for pattern development.
+Redflag combines provider formats, credential assignment rules, and optional
+entropy checks. File and Git-history scans use the same detector.
 
-## Pattern Structure
+## Built-in detection
 
-Each pattern in Redflag is defined by four components:
+Provider rules recognize GitHub classic and fine-grained tokens, AWS access IDs,
+Stripe secret/restricted keys, and npm access tokens independently of variable
+names. They enforce token boundaries so a fixed-length match cannot silently
+accept the beginning of a longer string. Private key headers are also recognized.
 
-```toml
-[[patterns]]
-name = "pattern-name"
-pattern = "regex-pattern"
-description = "Human-readable description"
-severity = "Critical"  # Options: Critical, High, Medium, Low
-```
+Assignment rules extract the complete literal before validating it. They support
+quoted keys, single/double/backtick strings, unquoted values, and `=`, `:`, `=>`,
+and `:=` syntax. AWS secret values require credential context and the expected
+alphabet/length. Generic API keys accept hexadecimal and base64 values of at
+least 32 characters. Password assignments require at least eight bytes;
+`.netrc` passwords use the file's explicit credential syntax.
 
-- `name`: A unique identifier for the pattern (kebab-case recommended)
-- `pattern`: A regular expression that matches the secret
-- `description`: A clear description of what the pattern detects
-- `severity`: The risk level of the detected secret
+Plain references such as `${DATABASE_PASSWORD}` are excluded. Literal JavaScript
+fallbacks and shell defaults are inspected, including when the default is inside
+quotes. Known placeholders and Stripe publishable keys are excluded from generic
+rules. Database URLs require a nonempty password. These are detection heuristics,
+not a parser for every programming language or proof that a credential is valid.
 
-## Severity Levels
+Entropy checks retain the default threshold of 4.8 and minimum length of 30.
+Lowering the threshold globally increases noise; hexadecimal credentials should
+be found through their credential context. Labeled checksums are excluded only
+from entropy checks, so a provider token under a checksum label still produces a
+finding. Entropy also skips lockfiles but provider rules continue to inspect them
+when the path is selected for scanning.
 
-### Critical
-- Credentials that provide direct access to sensitive systems
-- Examples: AWS keys, database passwords, private keys
-- Immediate action required
-
-### High
-- Sensitive information that could be part of a larger attack
-- Examples: API keys, OAuth tokens, encryption keys
-- Action required soon
-
-### Medium
-- Potentially sensitive information requiring review
-- Examples: Internal URLs, non-production credentials
-- Should be reviewed
-
-### Low
-- Items that should be checked but may be acceptable
-- Examples: Test credentials, documentation tokens
-- Review when convenient
-
-## Pattern Best Practices
-
-### 1. Make Patterns Specific
-
-❌ Bad:
-```toml
-pattern = "password=.*"  # Too broad, many false positives
-```
-
-✅ Good:
-```toml
-pattern = '''(?i)password\s*=\s*['""][^'""]{8,}['""]'''  # Specific format
-```
-
-### 2. Use Case-Insensitive Matching
-
-- Use `(?i)` prefix for case-insensitive matching where appropriate
-- Consider variations in naming (e.g., `api_key`, `apikey`, `api-key`)
-
-```toml
-pattern = '''(?i)api[_-]?key\s*=\s*['""][a-zA-Z0-9]{32,}['""]'''
-```
-
-### 3. Account for Common Formats
-
-- Consider different assignment operators (`=`, `:`, `=>`)
-- Account for various quote types (`'`, `"`, `"""`)
-- Allow for flexible whitespace with `\s*`
-
-```toml
-pattern = '''(?i)(api[_-]?key|access[_-]?token)\s*[:=]>\s*['""][a-zA-Z0-9-_]{32,}['""]'''
-```
-
-### 4. Validate Pattern Length
-
-- Include minimum length requirements for secrets
-- Use quantifiers to prevent short matches
-- Consider maximum lengths for specific formats
-
-```toml
-pattern = '''(?i)github[_-]?token\s*=\s*gh[pousr]_[a-zA-Z0-9]{36}'''  # Exact GitHub token length
-```
-
-## Common Pattern Types
-
-### 1. API Keys
+## Custom rules
 
 ```toml
 [[patterns]]
-name = "generic-api-key"
-pattern = '''(?i)api[_-]?key\s*=\s*['""][a-zA-Z0-9-_]{32,}['""]'''
-description = "Generic API key with minimum length of 32 characters"
+name = "internal-service-token"
+pattern = '''service_token\s*=\s*"(?P<secret>[A-Za-z0-9_-]{32,})"'''
+description = "Internal service token"
+severity = "High"
 ```
 
-### 2. Access Tokens
+The fields are `name`, `pattern`, `description`, and `severity` (`Critical`, `High`,
+`Medium`, or `Low`). Severity expresses a policy choice, not confidence or
+verification status.
 
-```toml
-[[patterns]]
-name = "oauth-token"
-pattern = '''(?i)(oauth|access)[_-]?token\s*=\s*['""][a-zA-Z0-9-_]{32,}['""]'''
-description = "OAuth or Access Token"
-```
+A named `secret` capture selects the value to report and redact. Without that
+capture, the entire regex match is used. All detected ranges on a line are
+redacted in every snippet, including adjacent credentials.
 
-### 3. Credentials
+A rule with an existing name replaces that rule. Built-in validation applies
+only when both its name and regex match the current built-in definition. A
+custom regex keeps its own matching semantics, even if it replaces a built-in
+rule. Generated configurations preserve the built-in validation. An older
+configuration that supplies old pattern definitions still overrides new defaults;
+review those overrides when upgrading.
 
-```toml
-[[patterns]]
-name = "database-url"
-pattern = '''(?i)(mongodb|postgresql|mysql)://([\w-]+:[\w-]+@)?[\w.-]+[:]\d+/[\w-]+'''
-description = "Database connection string with potential credentials"
-```
+Use Rust's `regex` syntax. Lookaround and backreferences are unsupported. Keep
+provider-specific prefixes case sensitive when their format requires it. Capture
+complete values and test token boundaries; matching an arbitrary 32-character
+prefix can both misclassify a value and leave its remaining characters exposed.
 
-### 4. Private Keys
+## Regression tests
 
-```toml
-[[patterns]]
-name = "private-key"
-pattern = '''-----BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY(\s+ENCRYPTED)?-----'''
-description = "Private key file header"
-```
+Add generated fixtures to `tests/detection_tests.rs` or focused scanner tests:
 
-## Testing Your Pattern
+- Positive cases across supported quoting and assignment styles, including bare
+  provider tokens, build outputs, and relevant credential file names.
+- Negative cases for references, checksums, public identifiers, and malformed
+  token boundaries.
+- Multiple credentials on one line, with assertions that each is found and all
+  values are redacted from every report snippet.
+- File/history parity and custom-rule behavior when either is affected.
 
-1. Create a test file with both positive and negative examples
-2. Test the pattern against real-world examples
-3. Verify minimal false positives
-4. Check performance impact
+Construct synthetic values from short pieces at runtime. Do not commit complete
+credentials or exempt the test directory from scanning. Assert the expected file
+and rule, since a duplicate finding elsewhere must not hide a missed case.
 
-Build a test file without storing complete synthetic secrets in the repository:
-```bash
-api_key_first="abcd1234efgh5678"
-api_key_second="ijkl9012mnop3456"
-token_first="zyxw9876vutsrqpon"
-token_second="mlkjihgfedcba"
-
-printf 'API_KEY="%s%s"\n' "$api_key_first" "$api_key_second" > pattern-fixture.env
-printf "access_token='%s%s'\n" "$token_first" "$token_second" >> pattern-fixture.env
-printf 'api_prefix="test"\nnot_an_api_key="short"\n' >> pattern-fixture.env
-```
-
-## Pattern Validation
-
-Before submitting a pattern:
-
-1. **Uniqueness**: Ensure it doesn't duplicate existing patterns
-2. **Performance**: Test with large codebases to verify performance
-3. **False Positives**: Minimise false positives with specific matches
-4. **Documentation**: Include clear description and examples
-
-## Common Pitfalls
-
-1. **Over-matching**: Patterns that are too broad
-2. **Under-matching**: Missing common variations
-3. **Performance Issues**: Complex regex with excessive backtracking
-4. **False Positives**: Not accounting for common code patterns
-
-## Contributing
-
-1. Fork the repository
-2. Add your pattern to `redflag.example.toml`
-3. Add tests for your pattern
-4. Submit a pull request with:
-   - Pattern description
-   - Example matches
-   - Test cases
-   - Use case explanation
-
-## Pattern Testing Tools
-
-Use these tools to test your patterns:
-
-1. [regex101.com](https://regex101.com) - Interactive regex testing
-2. [regexr.com](https://regexr.com) - Visual regex explanation
-3. Local testing:
-   ```bash
-   # Test your pattern
-   redflag scan --config your-pattern.toml ./test-dir
-   ```
-
-## Need Help?
-
-- Open an issue for pattern discussion
-- Join our community discussions
-- Check existing patterns for examples
-
-Remember: Security tools are only as good as their patterns. Help us improve Redflag by contributing high-quality, well-tested patterns!
+Run `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo fmt -- --check`. A small synthetic fixture set is regression evidence, not
+a real-world recall estimate. Keep additional reported misses as new fixtures.
