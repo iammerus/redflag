@@ -318,6 +318,60 @@ fn invalid_config_is_an_error() {
 }
 
 #[test]
+fn repeated_exclusions_preserve_the_last_policy() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("assets/secret.rs"));
+    write_secret(&dir.path().join("node_modules/secret.rs"));
+    let config = dir.path().join("redflag.toml");
+    for (glob, policies, expected) in [
+        (
+            "**/assets/**",
+            ["ScanButAllow", "Ignore", "ScanButAllow"],
+            1,
+        ),
+        ("**/assets/**", ["Ignore", "ScanButAllow", "Ignore"], 0),
+        (
+            "**/node_modules/**",
+            ["ScanButAllow", "Ignore", "ScanButAllow"],
+            1,
+        ),
+    ] {
+        // Restrict the target so the other fixture cannot conceal a missed rule.
+        let target = if glob.contains("node_modules") {
+            dir.path().join("node_modules/secret.rs")
+        } else {
+            dir.path().join("assets/secret.rs")
+        };
+        let other = if glob.contains("node_modules") {
+            "**/assets/**"
+        } else {
+            "**/node_modules/**"
+        };
+        let mut contents = format!("[[exclusions]]\npattern = \"{other}\"\npolicy = \"Ignore\"\n");
+        for policy in policies {
+            contents.push_str(&format!(
+                "[[exclusions]]\npattern = \"{glob}\"\npolicy = \"{policy}\"\n"
+            ));
+        }
+        fs::write(&config, contents).unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(output.status.code(), Some(expected));
+        let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(findings.as_array().unwrap().len(), expected as usize);
+        if expected == 1 {
+            assert_eq!(findings[0]["file"], target.to_str().unwrap());
+        }
+    }
+}
+
+#[test]
 fn history_defaults_to_head_on_trunk() {
     let dir = trunk_repo_with_deleted_secret();
     let output = redflag_with_args(&[

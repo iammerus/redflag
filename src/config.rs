@@ -353,9 +353,10 @@ impl Config {
                 }
             }
             for exclusion in user.exclusions {
-                if !config.exclusions.contains(&exclusion) {
-                    config.exclusions.push(exclusion);
-                }
+                // Keep the last occurrence at its original precedence. Removing
+                // a later duplicate can leave an intervening Ignore rule active.
+                config.exclusions.retain(|existing| existing != &exclusion);
+                config.exclusions.push(exclusion);
             }
             if let Some(entropy) = user.entropy {
                 config.entropy = entropy;
