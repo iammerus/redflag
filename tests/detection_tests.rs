@@ -14,6 +14,59 @@ fn token_body(length: usize) -> String {
         .collect()
 }
 
+#[test]
+fn suppression_directives_must_be_real_supported_comments() {
+    let dir = tempdir().unwrap();
+    let value = format!("ghp_{}", token_body(36));
+    let marker = ["// redflag-", "ignore example"].concat();
+    let cases = [
+        (
+            "data.json",
+            format!(r#"{{"note":"{marker}","value":"{value}"}}"#),
+        ),
+        (
+            "string.js",
+            format!(r#"const note = "{marker}"; const value = "{value}";"#),
+        ),
+        (
+            "template.js",
+            format!("const note = `start\n{marker}\n{value}`;\n"),
+        ),
+        (
+            "raw.rs",
+            format!("let note = r##\"start\n\" {marker}\n{value}\"##;\n"),
+        ),
+        (
+            "block.js",
+            format!("/* {marker} */ const value = \"{value}\";\n"),
+        ),
+    ];
+    for (file, content) in cases {
+        let path = dir.path().join(file);
+        fs::write(&path, content).unwrap();
+        let (code, findings) = scan(&path, None, false);
+        assert_eq!(code, 1, "{file}");
+        assert!(
+            findings.iter().any(|f| f["pattern_name"] == "GitHub Token"),
+            "{file}"
+        );
+        assert!(!serde_json::to_string(&findings).unwrap().contains(&value));
+    }
+
+    let path = dir.path().join("supported.js");
+    let ignore = ["// redflag-", "ignore"].concat();
+    fs::write(&path, format!(
+        "const a = \"{value}\"; {ignore} reason mentions ignore-next\nconst b = \"{value}\";\n{ignore}-next deliberate fixture\nconst c = \"{value}\";\nconst d = \"{value}\";\n"
+    )).unwrap();
+    let (_, findings) = scan(&path, None, false);
+    let lines: Vec<_> = findings
+        .iter()
+        .filter(|f| f["pattern_name"] == "GitHub Token")
+        .map(|f| f["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, [2, 5]);
+}
+
 fn scan(path: &Path, config: Option<&Path>, history: bool) -> (i32, Vec<Value>) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
     command.args([

@@ -32,6 +32,12 @@ when the path is selected for scanning.
 
 ## Custom rules
 
+Source suppressions use `// redflag-ignore` on the current line or
+`// redflag-ignore-next` on the preceding line in supported C-style source
+languages. The directive must be a line comment outside strings, template
+literals, raw strings, and block comments. JSON and other data files do not
+interpret these phrases as directives. A reason can follow the directive.
+
 ```toml
 [[patterns]]
 name = "internal-service-token"

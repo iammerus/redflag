@@ -12,9 +12,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-const IGNORE_COMMENT_PATTERN: &str = r"(?i)//\s*redflag-ignore(?:-next)?(?:\s+.*)?$";
-static IGNORE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(IGNORE_COMMENT_PATTERN).unwrap());
+pub(crate) use crate::suppression::SuppressionState;
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct Finding {
@@ -148,11 +146,6 @@ pub(crate) struct ContentLine<'a> {
     pub content: &'a str,
     pub commit: Option<&'a CommitMetadata>,
     pub emit_findings: bool,
-}
-
-#[derive(Default)]
-pub(crate) struct SuppressionState {
-    ignore_next_line: bool,
 }
 
 pub trait FindingHandler {
@@ -408,14 +401,7 @@ impl Scanner {
         state: &mut SuppressionState,
         commit: Option<&CommitMetadata>,
     ) -> Vec<Finding> {
-        if IGNORE_REGEX.is_match(line) {
-            if line.to_ascii_lowercase().contains("ignore-next") {
-                state.ignore_next_line = true;
-            }
-            return Vec::new();
-        }
-        if state.ignore_next_line {
-            state.ignore_next_line = false;
+        if state.consume(path, line) {
             return Vec::new();
         }
 

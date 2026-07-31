@@ -3,6 +3,7 @@ mod error;
 mod git_scanner;
 mod output;
 mod scanner;
+mod suppression;
 
 use crate::{config::Config, error::RedflagError, output::OutputHandler, scanner::Scanner};
 use clap::{Parser, Subcommand};
