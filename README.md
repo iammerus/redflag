@@ -123,6 +123,10 @@ redflag scan [PATH]
 When no Git revision is configured, history scanning starts from `HEAD`. Every
 explicit revision must resolve or the scan exits with code `2`.
 
+History scans require a complete checkout. Shallow repositories and histories
+that exceed `--git-max-depth` fail with exit code `2`; they cannot produce a
+clean partial result. Fetch full history and increase the limit when needed.
+
 An explicitly named regular file is scanned regardless of its extension.
 Directory scans use the configured extensions and recognise `.env` and names
 such as `.env.local`. Common extensionless configuration files including

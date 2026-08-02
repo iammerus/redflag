@@ -132,9 +132,9 @@ fn run_scan(
         }
     }
     config.validate()?;
-    if git_history {
-        git_scanner::validate_git_scan(Path::new(&path), &config.git)?;
-    }
+    let history = git_history
+        .then(|| git_scanner::HistoryScan::prepare(Path::new(&path), &config.git))
+        .transpose()?;
 
     let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
     let mut handler = OutputHandler::new(format, !no_progress);
@@ -145,13 +145,8 @@ fn run_scan(
     }
     let working_stats = working_result?;
 
-    let history_stats = if git_history {
-        let history_result = git_scanner::scan_git_history_with_handler(
-            Path::new(&path),
-            &scanner,
-            &config.git,
-            &mut handler,
-        );
+    let history_stats = if let Some(history) = history {
+        let history_result = history.scan(&scanner, &mut handler);
         if history_result.is_err() {
             handler.clear_progress();
         }

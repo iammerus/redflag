@@ -7,41 +7,77 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
+use git2::{Commit, DiffOptions, Oid, Patch, Repository, Revwalk, Sort};
 use std::path::Path;
 
-pub fn validate_git_scan(path: &Path, config: &GitConfig) -> Result<(), RedflagError> {
-    let repo = Repository::open(path)?;
-    let mut revwalk = repo.revwalk()?;
-    push_revisions(&repo, &mut revwalk, config)
+pub(crate) struct HistoryScan {
+    repo: Repository,
+    commits: Vec<Oid>,
 }
 
+impl HistoryScan {
+    /// Resolve the complete requested history before emitting any scan results.
+    pub(crate) fn prepare(path: &Path, config: &GitConfig) -> Result<Self, RedflagError> {
+        let repo = Repository::open(path)?;
+        if repo.is_shallow() {
+            return Err(RedflagError::Incomplete(
+                "Git history is shallow. Fetch the full history (actions/checkout fetch-depth: 0) and retry."
+                    .to_string(),
+            ));
+        }
+        let mut revwalk = repo.revwalk()?;
+        push_revisions(&repo, &mut revwalk, config)?;
+        revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+        let mut commits = Vec::new();
+        for (index, oid) in revwalk.enumerate() {
+            let oid = oid?;
+            if index >= config.max_depth {
+                return Err(RedflagError::Incomplete(format!(
+                    "Git history exceeds the {}-commit limit. Increase --git-max-depth to inspect the requested history.",
+                    config.max_depth
+                )));
+            }
+            let commit = repo.find_commit(oid)?;
+            if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
+                commits.push(oid);
+            }
+        }
+        Ok(Self { repo, commits })
+    }
+
+    pub(crate) fn scan<H: FindingHandler>(
+        &self,
+        scanner: &Scanner,
+        handler: &mut H,
+    ) -> Result<ScanStats, RedflagError> {
+        scan_prepared_history(&self.repo, &self.commits, scanner, handler)
+    }
+}
+
+#[cfg(test)]
 pub fn scan_git_history_with_handler<H: FindingHandler>(
     path: &Path,
     scanner: &Scanner,
     config: &GitConfig,
     handler: &mut H,
 ) -> Result<ScanStats, RedflagError> {
-    let repo = Repository::open(path)?;
-    let mut revwalk = repo.revwalk()?;
-    push_revisions(&repo, &mut revwalk, config)?;
-    revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+    HistoryScan::prepare(path, config)?.scan(scanner, handler)
+}
 
+fn scan_prepared_history<H: FindingHandler>(
+    repo: &Repository,
+    commits: &[Oid],
+    scanner: &Scanner,
+    handler: &mut H,
+) -> Result<ScanStats, RedflagError> {
     handler.progress(ScanProgress::Preparing {
         phase: "Git history",
     })?;
-    let mut commits = Vec::new();
-    for oid in revwalk.take(config.max_depth) {
-        let commit = repo.find_commit(oid?)?;
-        if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
-            commits.push(commit);
-        }
-    }
-
     let mut stats = ScanStats::default();
     let total = commits.len();
     stats.commits = total;
-    for (index, commit) in commits.into_iter().enumerate() {
+    for (index, oid) in commits.iter().enumerate() {
+        let commit = repo.find_commit(*oid)?;
         let current = index + 1;
         let short_hash = commit.id().to_string()[..8].to_string();
         let subject = commit.summary().unwrap_or("<no subject>");
@@ -51,15 +87,8 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
             total,
             detail: format!("{short_hash} {subject}"),
         })?;
-        let commit_stats = process_commit(
-            &repo,
-            &commit,
-            scanner,
-            handler,
-            current,
-            total,
-            &short_hash,
-        )?;
+        let commit_stats =
+            process_commit(repo, &commit, scanner, handler, current, total, &short_hash)?;
         stats.files += commit_stats.files;
         stats.findings += commit_stats.findings;
     }

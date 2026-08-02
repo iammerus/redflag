@@ -388,6 +388,48 @@ fn history_defaults_to_head_on_trunk() {
 }
 
 #[test]
+fn history_limits_fail_before_emitting_results() {
+    let dir = trunk_repo_with_deleted_secret();
+    for (limit, expected) in [(1, 2), (2, 1), (3, 1)] {
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--git-max-depth",
+            &limit.to_string(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(output.status.code(), Some(expected));
+        if expected == 2 {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("exceeds"));
+        }
+    }
+}
+
+#[test]
+fn shallow_history_is_an_operational_failure() {
+    let dir = trunk_repo_with_deleted_secret();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head().unwrap().target().unwrap();
+    // Git's shallow boundary must be respected even when older objects happen
+    // to remain locally (for example, after a partial fetch).
+    fs::write(repo.path().join("shallow"), format!("{head}\n")).unwrap();
+    drop(repo);
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("shallow"));
+}
+
+#[test]
 fn missing_git_revision_is_an_error() {
     let dir = trunk_repo_with_deleted_secret();
     let output = redflag_with_args(&[

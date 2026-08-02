@@ -16,6 +16,9 @@ pub enum RedflagError {
     #[error("Invalid scan target: {0}")]
     InvalidTarget(PathBuf),
 
+    #[error("Scan incomplete: {0}")]
+    Incomplete(String),
+
     #[error("Directory traversal error: {0}")]
     WalkDir(#[from] walkdir::Error),
 
