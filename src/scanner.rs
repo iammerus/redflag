@@ -141,7 +141,7 @@ pub(crate) struct Detection<'a> {
 
 pub(crate) struct ContentLine<'a> {
     pub path: &'a Path,
-    pub policy_path: &'a Path,
+    pub policy: ExclusionPolicy,
     pub number: usize,
     pub content: &'a str,
     pub commit: Option<&'a CommitMetadata>,
@@ -150,6 +150,10 @@ pub(crate) struct ContentLine<'a> {
 
 pub trait FindingHandler {
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError>;
+
+    fn warning(&mut self, _finding: Finding) -> Result<(), RedflagError> {
+        Ok(())
+    }
 
     fn progress(&mut self, _progress: ScanProgress) -> Result<(), RedflagError> {
         Ok(())
@@ -356,7 +360,7 @@ impl Scanner {
             findings_count += self.scan_line_with_handler(
                 ContentLine {
                     path,
-                    policy_path,
+                    policy,
                     number: line_num + 1,
                     content: line,
                     commit,
@@ -375,16 +379,19 @@ impl Scanner {
         state: &mut SuppressionState,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let policy = self.file_policy(input.policy_path, false);
-        let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
-        if !input.emit_findings || policy == ExclusionPolicy::Ignore {
+        if input.policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
+        if !input.emit_findings {
+            state.consume(input.path, input.content);
+            return Ok(0);
+        }
+        let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
 
         let mut count = 0;
         for finding in findings {
-            if policy == ExclusionPolicy::ScanButWarn {
-                eprintln!("WARNING: Potential secret found but allowed: {finding:?}");
+            if input.policy == ExclusionPolicy::ScanButWarn {
+                handler.warning(finding)?;
             } else {
                 handler.handle(finding)?;
                 count += 1;

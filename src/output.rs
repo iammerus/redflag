@@ -269,6 +269,16 @@ impl OutputHandler {
 }
 
 impl FindingHandler for OutputHandler {
+    fn warning(&mut self, finding: Finding) -> Result<(), RedflagError> {
+        self.clear_rendered_progress();
+        writeln!(
+            self.progress_writer,
+            "WARNING: Potential secret found but allowed: {finding:?}"
+        )?;
+        self.draw_progress(true);
+        Ok(())
+    }
+
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
         let severity = finding.severity;
         match self.format {

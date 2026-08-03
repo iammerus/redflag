@@ -1,5 +1,5 @@
 use crate::{
-    config::GitConfig,
+    config::{ExclusionPolicy, GitConfig},
     error::RedflagError,
     scanner::{
         CommitMetadata, ContentLine, FindingHandler, ScanProgress, ScanStats, Scanner,
@@ -136,6 +136,9 @@ fn process_commit<H: FindingHandler>(
         None
     };
     let mut options = DiffOptions::new();
+    // NUL bytes and Git attributes must not silently turn selected content into
+    // an uninspected binary delta. Unsupported encodings fail below.
+    options.force_text(true);
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
     let metadata = CommitMetadata {
         hash: commit.id().to_string(),
@@ -153,7 +156,11 @@ fn process_commit<H: FindingHandler>(
         let Some(path) = delta.new_file().path() else {
             continue;
         };
-        if !scanner.should_scan_path(path) {
+        let policy = scanner.file_policy(path, false);
+        if delta.new_file().id().is_zero()
+            || policy == ExclusionPolicy::Ignore
+            || !scanner.should_scan_path(path)
+        {
             continue;
         }
         handler.progress(ScanProgress::Item {
@@ -162,33 +169,60 @@ fn process_commit<H: FindingHandler>(
             total,
             detail: format!("{short_hash} {}", path.display()),
         })?;
-        let Some(patch) = Patch::from_diff(&diff, delta_index)? else {
-            continue;
-        };
+        let patch = Patch::from_diff(&diff, delta_index)?.ok_or_else(|| {
+            RedflagError::Incomplete(format!(
+                "Cannot inspect Git change {} in {short_hash}.",
+                path.display()
+            ))
+        })?;
 
         stats.files += 1;
+        let mut added_lines = Vec::new();
         for hunk_index in 0..patch.num_hunks() {
             let (_, line_count) = patch.hunk(hunk_index)?;
-            let mut state = SuppressionState::default();
             for line_index in 0..line_count {
                 let line = patch.line_in_hunk(hunk_index, line_index)?;
-                if !matches!(line.origin(), '+' | ' ') {
-                    continue;
+                if line.origin() == '+' {
+                    if let Some(number) = line.new_lineno() {
+                        added_lines.push(number as usize);
+                    }
                 }
-                let content = String::from_utf8_lossy(line.content());
-                let content = content.trim_end_matches(['\r', '\n']);
-                stats.findings += scanner.scan_line_with_handler(
-                    ContentLine {
-                        path,
-                        policy_path: path,
-                        number: line.new_lineno().unwrap_or(0) as usize,
-                        content,
-                        commit: Some(&metadata),
-                        emit_findings: line.origin() == '+',
-                    },
-                    &mut state,
-                    handler,
-                )?;
+            }
+        }
+        if added_lines.is_empty() {
+            continue;
+        }
+        let blob = repo.find_blob(delta.new_file().id())?;
+        let content = std::str::from_utf8(blob.content()).map_err(|_| {
+            RedflagError::Incomplete(format!(
+                "Git file {} in {short_hash} is not UTF-8. Convert the file or explicitly exclude unsupported content.",
+                path.display()
+            ))
+        })?;
+        let mut added_lines = added_lines.into_iter().peekable();
+        let mut state = SuppressionState::default();
+        // Read lexical context from the beginning of the actual new blob. A
+        // hunk can begin inside a template/raw string or block comment.
+        for (index, line) in content.lines().enumerate() {
+            let number = index + 1;
+            let emit_findings = added_lines.peek() == Some(&number);
+            if emit_findings {
+                added_lines.next();
+            }
+            stats.findings += scanner.scan_line_with_handler(
+                ContentLine {
+                    path,
+                    policy,
+                    number,
+                    content: line,
+                    commit: Some(&metadata),
+                    emit_findings,
+                },
+                &mut state,
+                handler,
+            )?;
+            if added_lines.peek().is_none() {
+                break;
             }
         }
     }

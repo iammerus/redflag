@@ -430,6 +430,122 @@ fn shallow_history_is_an_operational_failure() {
 }
 
 #[test]
+fn binary_classification_cannot_hide_history_content() {
+    for (folder, prefix, expected) in [("app", 0u8, 1), ("app", 255u8, 2), ("vendor", 255u8, 0)] {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        let path = Path::new(folder).join("secret.js");
+        fs::create_dir_all(dir.path().join(folder)).unwrap();
+        let mut bytes = vec![prefix];
+        bytes.extend_from_slice(format!("api_key = \"{}\"\n", synthetic_secret()).as_bytes());
+        fs::write(dir.path().join(&path), bytes).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(&path).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let first = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Add fixture",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        fs::remove_file(dir.path().join(&path)).unwrap();
+        index.remove_path(&path).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(first).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Remove fixture",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if expected == 2 {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("not UTF-8"));
+        } else {
+            let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(findings.as_array().unwrap().len(), expected as usize);
+            if expected == 1 {
+                assert_eq!(findings[0]["commit_hash"], first.to_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn history_preserves_template_context_before_diff_hunks() {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let signature = Signature::now("Test User", "test@example.com").unwrap();
+    let path = dir.path().join("template.js");
+    let prefix = format!("const template = `\n{}", "ordinary text\n".repeat(20));
+    fs::write(&path, format!("{prefix}old text\n`;\n")).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("template.js")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let first = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Start template",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let marker = ["// redflag-", "ignore example"].concat();
+    let token = ["ghp_", "aB3dE6gH9jK2mN5p", "Q8sT1vW4xY7zA0cD3fG6"].concat();
+    fs::write(&path, format!("{prefix}{marker} {token}\n`;\n")).unwrap();
+    index.add_path(Path::new("template.js")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = repo.find_commit(first).unwrap();
+    let second = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Add literal",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(findings.as_array().unwrap().len(), 2);
+    assert_eq!(findings[1]["commit_hash"], second.to_string());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
+}
+
+#[test]
 fn missing_git_revision_is_an_error() {
     let dir = trunk_repo_with_deleted_secret();
     let output = redflag_with_args(&[
