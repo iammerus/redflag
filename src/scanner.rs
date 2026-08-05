@@ -5,6 +5,7 @@ use crate::{
 use glob::Pattern;
 use regex::Regex;
 use std::{
+    collections::HashMap,
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -95,12 +96,7 @@ impl CompiledPattern {
                     // The colon in ${PASSWORD:-value} is a shell operator,
                     // not an object assignment to PASSWORD.
                     if found.start() > full_match.start()
-                        && line[..full_match.start()]
-                            .rsplit_once("${")
-                            .is_some_and(|(_, tail)| {
-                                tail.bytes()
-                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                            })
+                        && inside_shell_parameter(&line[..full_match.start()])
                     {
                         return None;
                     }
@@ -413,16 +409,13 @@ impl Scanner {
         }
 
         let mut detections: Vec<Detection<'_>> = Vec::new();
-        let mut builtin_indices: Vec<usize> = Vec::new();
+        let mut builtin_indices: HashMap<(usize, usize), usize> = HashMap::new();
         for pattern in &self.patterns {
             for range in pattern.ranges(line, path) {
                 // Keep independent values on a line, but report a literal only
                 // once when several built-in rules recognize the same value.
                 if pattern.builtin {
-                    if let Some(index) = builtin_indices
-                        .iter()
-                        .find(|&&index| detections[index].range == range)
-                    {
+                    if let Some(index) = builtin_indices.get(&(range.start, range.end)) {
                         let previous = &mut detections[*index];
                         if severity_rank(pattern.rule.severity) < severity_rank(previous.severity) {
                             previous.name = &pattern.rule.name;
@@ -431,7 +424,7 @@ impl Scanner {
                         }
                         continue;
                     }
-                    builtin_indices.push(detections.len());
+                    builtin_indices.insert((range.start, range.end), detections.len());
                 }
                 detections.push(Detection {
                     range,
@@ -443,10 +436,15 @@ impl Scanner {
         }
 
         if self.entropy_config.enabled && !is_lockfile(path) {
+            let known_ranges = merged_ranges(detections.iter().map(|item| item.range.clone()));
             for candidate in extract_entropy_candidates(line, self.entropy_config.min_length) {
-                if detections.iter().any(|item| {
-                    item.range.start <= candidate.start && item.range.end >= candidate.end
-                }) || is_checksum_context(&line[..candidate.start])
+                let preceding =
+                    known_ranges.partition_point(|range| range.start <= candidate.start);
+                let covered = preceding
+                    .checked_sub(1)
+                    .is_some_and(|index| known_ranges[index].end >= candidate.end);
+                if covered
+                    || is_checksum_context(&line[..candidate.start])
                     || is_reference(&line[candidate.clone()])
                     || is_publishable_key(&line[candidate.clone()])
                 {
@@ -518,10 +516,11 @@ pub(crate) fn finding_snippet(
     } else {
         let mut snippet = String::new();
         let mut cursor = start;
-        for range in redactions {
-            if range.end <= start || range.start >= end {
-                continue;
-            }
+        let first = redactions.partition_point(|range| range.end <= start);
+        for range in redactions[first..]
+            .iter()
+            .take_while(|range| range.start < end)
+        {
             if range.start > cursor {
                 snippet.push_str(&text[cursor..range.start.min(end)]);
             }
@@ -635,6 +634,15 @@ fn shell_default_range(line: &str, range: &Range<usize>) -> Option<Range<usize>>
     Some(range.start + value.start()..range.start + value.end())
 }
 
+fn inside_shell_parameter(prefix: &str) -> bool {
+    let name_length = prefix
+        .bytes()
+        .rev()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    prefix[..prefix.len() - name_length].ends_with("${")
+}
+
 fn is_placeholder(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
@@ -660,11 +668,36 @@ fn is_publishable_key(value: &str) -> bool {
 }
 
 fn is_checksum_context(prefix: &str) -> bool {
-    static CHECKSUM: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?i)\b(?:sha(?:1|224|256|384|512)|md5|checksum|digest|integrity)["'`]?\s*[:=]\s*["'`]?$"#)
-            .unwrap()
-    });
-    CHECKSUM.is_match(prefix)
+    // Inspect the adjacent assignment, not the entire prefix for every string
+    // in a minified bundle. Only remove one optional opening/closing quote.
+    let prefix = prefix
+        .strip_suffix(['"', '\'', '`'])
+        .unwrap_or(prefix)
+        .trim_end();
+    let Some(prefix) = prefix.strip_suffix([':', '=']) else {
+        return false;
+    };
+    let prefix = prefix.trim_end();
+    let prefix = prefix.strip_suffix(['"', '\'', '`']).unwrap_or(prefix);
+    let name_length = prefix
+        .bytes()
+        .rev()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    let name = &prefix[prefix.len() - name_length..];
+    [
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+        "md5",
+        "checksum",
+        "digest",
+        "integrity",
+    ]
+    .iter()
+    .any(|expected| name.eq_ignore_ascii_case(expected))
 }
 
 fn token_boundary(line: &str, range: &Range<usize>) -> bool {

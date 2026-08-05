@@ -168,6 +168,24 @@ fn known_tokens_are_detected_without_variable_name_or_entropy() {
 }
 
 #[test]
+fn dense_lines_keep_each_occurrence_and_redact_adjacent_values() {
+    let dir = tempdir().unwrap();
+    let value = format!("ghp_{}", token_body(36));
+    let path = dir.path().join("bundle.min.js");
+    let source = format!(
+        "[{}]",
+        std::iter::repeat_n(format!("\"{value}\""), 4096)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    fs::write(&path, source).unwrap();
+    let (_, findings) = scan(&path, None, false);
+    assert_eq!(findings.len(), 4096);
+    assert!(findings.iter().all(|finding| finding["line"] == 1));
+    assert!(!serde_json::to_string(&findings).unwrap().contains(&value));
+}
+
+#[test]
 fn generic_credentials_support_assignment_syntax_and_hex_without_lowering_entropy() {
     let dir = tempdir().unwrap();
     let config = entropy_off(dir.path());
