@@ -231,6 +231,30 @@ fn generic_credentials_support_assignment_syntax_and_hex_without_lowering_entrop
 }
 
 #[test]
+fn source_references_and_key_substrings_do_not_become_passwords() {
+    let dir = tempdir().unwrap();
+    let password = ["sample-", "literal-42"].concat();
+    let field = "password";
+    for extension in ["js", "rs", "py", "go"] {
+        let file = dir.path().join(format!("references.{extension}"));
+        fs::write(&file, format!(
+            "const {field} = getPassword;\n{field} = user.password\n{field} = &stored_password;\nnot{field} = \"not-a-credential\";\n"
+        )).unwrap();
+        assert_eq!(scan(&file, None, false).0, 0, "{extension}");
+        fs::write(&file, format!(
+            "const {field} = \"{password}\";\nconst databasePassword = \"{password}\";\nconst DATABASE_PASSWORD = \"{password}\";\n"
+        )).unwrap();
+        let (_, findings) = scan(&file, None, false);
+        assert_eq!(findings.len(), 3, "{extension}: {findings:?}");
+    }
+    for extension in ["env", "yaml", "toml", "sh"] {
+        let file = dir.path().join(format!("configuration.{extension}"));
+        fs::write(&file, format!("DATABASE_PASSWORD={password}\n")).unwrap();
+        assert_eq!(scan(&file, None, false).0, 1, "{extension}");
+    }
+}
+
+#[test]
 fn build_outputs_and_credential_files_are_scanned_in_working_tree_and_history() {
     let dir = tempdir().unwrap();
     let repo = Repository::init(dir.path()).unwrap();

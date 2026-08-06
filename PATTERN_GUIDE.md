@@ -17,6 +17,13 @@ alphabet/length. Generic API keys accept hexadecimal and base64 values of at
 least 32 characters. Password assignments require at least eight bytes;
 `.netrc` passwords use the file's explicit credential syntax.
 
+Credential names can use underscore/hyphen separators or camel-case suffixes,
+such as `DATABASE_PASSWORD` or `databasePassword`. Arbitrary substrings such as
+`notpassword` do not qualify. In programming-language source, assignment rules
+require quoted string values; unquoted names and expressions are references.
+Environment, shell, and configuration files retain unquoted literal support.
+Provider token formats are still recognized anywhere on a line.
+
 Plain references such as `${DATABASE_PASSWORD}` are excluded. Literal JavaScript
 fallbacks and shell defaults are inspected, including when the default is inside
 quotes. Known placeholders and Stripe publishable keys are excluded from generic

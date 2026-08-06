@@ -101,11 +101,11 @@ impl Default for EntropyConfig {
 const LITERAL: &str = r#"(?P<secret>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\$\{[^{}\r\n]*\}|[^\s"'`,;}\]]+)"#;
 
 fn assignment_pattern(key: &str, operator: &str) -> String {
-    format!(r#"(?i)(?:{key})["'`]?\s*(?:{operator})\s*{LITERAL}"#)
+    format!(r#"(?i)(?P<key>{key})["'`]?\s*(?:{operator})\s*{LITERAL}"#)
 }
 
 fn fallback_pattern(key: &str, source: &str) -> String {
-    format!(r#"(?i)(?:{key})["'`]?\s*(?::|=)\s*(?:{source})\s*(?:\|\||\?\?)\s*{LITERAL}"#)
+    format!(r#"(?i)(?P<key>{key})["'`]?\s*(?::|=)\s*(?:{source})\s*(?:\|\||\?\?)\s*{LITERAL}"#)
 }
 
 static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {

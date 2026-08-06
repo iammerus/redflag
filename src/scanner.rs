@@ -93,6 +93,11 @@ impl CompiledPattern {
                 let found = captures.name("secret").unwrap_or(full_match);
                 let mut range = found.range();
                 if self.builtin {
+                    if captures.name("key").is_some_and(|key| {
+                        !credential_key_boundary(line, key.start(), key.as_str())
+                    }) {
+                        return None;
+                    }
                     // The colon in ${PASSWORD:-value} is a shell operator,
                     // not an object assignment to PASSWORD.
                     if found.start() > full_match.start()
@@ -643,6 +648,30 @@ fn inside_shell_parameter(prefix: &str) -> bool {
     prefix[..prefix.len() - name_length].ends_with("${")
 }
 
+fn credential_key_boundary(line: &str, start: usize, key: &str) -> bool {
+    match line[..start].chars().next_back() {
+        None => true,
+        // Underscores/hyphens delimit credential suffixes in environment names.
+        Some(previous) if !previous.is_alphanumeric() => true,
+        // Camel-case suffixes such as clientSecret and databasePassword are
+        // credential names; arbitrary substrings such as notpassword are not.
+        Some(previous) => {
+            previous.is_ascii_lowercase()
+                && key.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        }
+    }
+}
+
+fn source_requires_quoted_values(path: &Path) -> bool {
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    [
+        "js", "mjs", "cjs", "ts", "jsx", "tsx", "rs", "py", "rb", "php", "java", "go", "cs", "c",
+        "cpp", "h", "hpp", "kt", "swift",
+    ]
+    .iter()
+    .any(|expected| extension.eq_ignore_ascii_case(expected))
+}
+
 fn is_placeholder(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
@@ -736,6 +765,13 @@ fn valid_builtin(name: &str, line: &str, range: &Range<usize>, quoted: bool, pat
         return !is_reference(password) && !is_placeholder(password);
     }
     if is_reference(value) || is_placeholder(value) || is_publishable_key(value) {
+        return false;
+    }
+    // In programming languages, unquoted assignment values are expressions,
+    // symbols or scalars, not string credentials. Environment/configuration
+    // files deliberately retain support for unquoted literal values. Provider
+    // formats above remain detectable anywhere, independently of assignments.
+    if !quoted && source_requires_quoted_values(path) {
         return false;
     }
     // Unquoted program expressions are references, not string literals. Quoted
