@@ -5,7 +5,8 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    io::{self, IsTerminal, Write},
+    fs::File,
+    io::{self, BufWriter, IsTerminal, Seek, SeekFrom, Write},
     time::{Duration, Instant},
 };
 
@@ -23,7 +24,7 @@ pub struct OutputHandler {
     format: OutputFormat,
     findings_count: usize,
     writer: Box<dyn Write>,
-    json_findings: Vec<Finding>,
+    json_spool: Option<BufWriter<File>>,
     findings_by_severity: HashMap<Severity, usize>,
     progress_writer: Box<dyn Write>,
     progress_enabled: bool,
@@ -60,7 +61,7 @@ impl OutputHandler {
             format,
             findings_count: 0,
             writer,
-            json_findings: Vec::new(),
+            json_spool: None,
             findings_by_severity: HashMap::new(),
             progress_writer,
             progress_enabled,
@@ -192,8 +193,15 @@ impl OutputHandler {
         self.clear_progress();
         match self.format {
             OutputFormat::Json => {
-                serde_json::to_writer_pretty(&mut self.writer, &self.json_findings)?;
-                writeln!(self.writer)?;
+                if let Some(spool) = &mut self.json_spool {
+                    spool.flush()?;
+                    spool.seek(SeekFrom::Start(0))?;
+                    self.writer.write_all(b"[\n")?;
+                    io::copy(spool.get_mut(), &mut self.writer)?;
+                    self.writer.write_all(b"\n]\n")?;
+                } else {
+                    self.writer.write_all(b"[]\n")?;
+                }
             }
             OutputFormat::Text => {
                 if self.findings_count == 0 {
@@ -302,7 +310,17 @@ impl FindingHandler for OutputHandler {
                 }
             }
             OutputFormat::Json => {
-                self.json_findings.push(finding);
+                // An anonymous private temporary file bounds report memory and
+                // leaves stdout empty if scanning fails before completion.
+                if self.json_spool.is_none() {
+                    self.json_spool =
+                        Some(BufWriter::with_capacity(64 * 1024, tempfile::tempfile()?));
+                }
+                let spool = self.json_spool.as_mut().expect("spool created above");
+                if self.findings_count > 0 {
+                    spool.write_all(b",\n")?;
+                }
+                serde_json::to_writer(spool, &finding)?;
             }
         }
 
