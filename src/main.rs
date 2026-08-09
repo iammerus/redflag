@@ -132,11 +132,11 @@ fn run_scan(
         }
     }
     config.validate()?;
+    let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
     let history = git_history
         .then(|| git_scanner::HistoryScan::prepare(Path::new(&path), &config.git))
         .transpose()?;
 
-    let scanner = Scanner::with_config(config.clone())?.show_secrets(show_secrets);
     let mut handler = OutputHandler::new(format, !no_progress);
 
     let working_result = scanner.scan_with_handler(&path, &mut handler);

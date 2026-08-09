@@ -79,7 +79,9 @@ struct CompiledPattern {
 impl CompiledPattern {
     fn new(rule: SecretPattern) -> Result<Self, RedflagError> {
         Ok(Self {
-            regex: Regex::new(&rule.pattern)?,
+            regex: Regex::new(&rule.pattern).map_err(|error| {
+                RedflagError::Config(format!("Invalid regex for '{}': {error}", rule.name))
+            })?,
             builtin: is_default_pattern(&rule),
             rule,
         })
@@ -173,8 +175,12 @@ impl Scanner {
             .into_iter()
             .map(|rule| {
                 Ok(ExclusionRule {
-                    pattern: Pattern::new(&rule.pattern)
-                        .map_err(|error| RedflagError::Config(error.to_string()))?,
+                    pattern: Pattern::new(&rule.pattern).map_err(|error| {
+                        RedflagError::Config(format!(
+                            "Invalid exclusion glob '{}': {error}",
+                            rule.pattern
+                        ))
+                    })?,
                     literal_prefix: rule
                         .pattern
                         .split(['*', '?', '[', '{'])

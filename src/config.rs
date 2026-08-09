@@ -1,6 +1,6 @@
 use crate::error::RedflagError;
 use chrono::NaiveDate;
-use glob::Pattern;
+#[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -371,19 +371,7 @@ impl Config {
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
-        for pattern in &self.patterns {
-            Regex::new(&pattern.pattern).map_err(|error| {
-                RedflagError::Config(format!("Invalid regex for '{}': {error}", pattern.name))
-            })?;
-        }
-        for exclusion in &self.exclusions {
-            Pattern::new(&exclusion.pattern).map_err(|error| {
-                RedflagError::Config(format!(
-                    "Invalid exclusion glob '{}': {error}",
-                    exclusion.pattern
-                ))
-            })?;
-        }
+        // Regexes and globs are validated by compiling them once in Scanner.
         if !(0.0..=8.0).contains(&self.entropy.threshold) {
             return Err(RedflagError::Config(
                 "Entropy threshold must be between 0.0 and 8.0".to_string(),
@@ -468,7 +456,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("redflag.toml");
         fs::write(&path, contents).unwrap();
-        Config::load(Some(path))
+        let config = Config::load(Some(path))?;
+        crate::scanner::Scanner::with_config(config.clone())?;
+        Ok(config)
     }
 
     #[test]
