@@ -1,5 +1,8 @@
 use crate::{
-    config::{is_default_pattern, Config, EntropyConfig, ExclusionPolicy, SecretPattern, Severity},
+    config::{
+        is_default_pattern, Config, EntropyConfig, ExclusionPolicy, ScanLimits, SecretPattern,
+        Severity,
+    },
     error::RedflagError,
 };
 use glob::Pattern;
@@ -7,6 +10,7 @@ use regex::Regex;
 use std::{
     collections::HashMap,
     fs,
+    io::{BufRead, BufReader, Read},
     ops::Range,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -68,6 +72,7 @@ pub struct Scanner {
     extensions: Vec<String>,
     exclusions: Vec<ExclusionRule>,
     show_secrets: bool,
+    limits: ScanLimits,
 }
 
 struct CompiledPattern {
@@ -164,7 +169,8 @@ pub trait FindingHandler {
 }
 
 impl Scanner {
-    pub fn with_config(config: Config) -> Result<Self, RedflagError> {
+    pub fn with_config(mut config: Config) -> Result<Self, RedflagError> {
+        config.validate()?;
         let patterns = config
             .patterns
             .into_iter()
@@ -200,12 +206,27 @@ impl Scanner {
             extensions: config.extensions,
             exclusions,
             show_secrets: false,
+            limits: config.limits,
         })
     }
 
     pub fn show_secrets(mut self, show_secrets: bool) -> Self {
         self.show_secrets = show_secrets;
         self
+    }
+
+    pub(crate) fn limits(&self) -> &ScanLimits {
+        &self.limits
+    }
+
+    pub(crate) fn check_file_limit(&self, path: &Path, length: u64) -> Result<(), RedflagError> {
+        if length > self.limits.max_file_bytes {
+            return Err(RedflagError::Incomplete(format!(
+                "{} exceeds the {}-byte file limit. Increase limits.max_file_bytes to inspect this content.",
+                path.display(), self.limits.max_file_bytes
+            )));
+        }
+        Ok(())
     }
 
     pub fn scan_with_handler<H: FindingHandler>(
@@ -265,6 +286,12 @@ impl Scanner {
                 && self.should_scan_path(entry.path())
             {
                 files_to_scan.push((entry.into_path(), relative));
+                if files_to_scan.len() > self.limits.max_files {
+                    return Err(RedflagError::Incomplete(format!(
+                        "The scan exceeds the {}-file limit. Narrow the target or increase limits.max_files.",
+                        self.limits.max_files
+                    )));
+                }
             }
         }
         files_to_scan.sort_by(|left, right| left.0.cmp(&right.0));
@@ -341,36 +368,53 @@ impl Scanner {
         policy_path: &Path,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let content = fs::read_to_string(path).map_err(|source| RedflagError::PathIo {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        self.scan_content(path, policy_path, &content, None, handler)
-    }
-
-    fn scan_content<H: FindingHandler>(
-        &self,
-        path: &Path,
-        policy_path: &Path,
-        content: &str,
-        commit: Option<&CommitMetadata>,
-        handler: &mut H,
-    ) -> Result<usize, RedflagError> {
         let policy = self.file_policy(policy_path, false);
         if policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
-
+        let file = fs::File::open(path).map_err(|source| RedflagError::PathIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut buffer = Vec::new();
         let mut state = SuppressionState::default();
         let mut findings_count = 0;
-        for (line_num, line) in content.lines().enumerate() {
+        let mut number = 0;
+        let mut bytes_read = 0u64;
+        loop {
+            buffer.clear();
+            let remaining_file_bytes = self
+                .limits
+                .max_file_bytes
+                .saturating_sub(bytes_read)
+                .saturating_add(1);
+            let read = (&mut reader)
+                .take(((self.limits.max_line_bytes + 3) as u64).min(remaining_file_bytes))
+                .read_until(b'\n', &mut buffer)
+                .map_err(|source| RedflagError::PathIo {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if read == 0 {
+                break;
+            }
+            bytes_read += read as u64;
+            self.check_file_limit(path, bytes_read)?;
+            number += 1;
+            let bytes = buffer.strip_suffix(b"\n").unwrap_or(&buffer);
+            let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+            self.check_line_limit(path, number, bytes.len())?;
+            let line = std::str::from_utf8(bytes).map_err(|_| RedflagError::Incomplete(format!(
+                "{}:{number} is not UTF-8. Convert the file or explicitly exclude unsupported content.", path.display()
+            )))?;
             findings_count += self.scan_line_with_handler(
                 ContentLine {
                     path,
                     policy,
-                    number: line_num + 1,
+                    number,
                     content: line,
-                    commit,
+                    commit: None,
                     emit_findings: true,
                 },
                 &mut state,
@@ -378,6 +422,21 @@ impl Scanner {
             )?;
         }
         Ok(findings_count)
+    }
+
+    fn check_line_limit(
+        &self,
+        path: &Path,
+        number: usize,
+        length: usize,
+    ) -> Result<(), RedflagError> {
+        if length > self.limits.max_line_bytes {
+            return Err(RedflagError::Incomplete(format!(
+                "{}:{number} exceeds the {}-byte line limit. Increase limits.max_line_bytes to inspect this content.",
+                path.display(), self.limits.max_line_bytes
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn scan_line_with_handler<H: FindingHandler>(
@@ -389,6 +448,7 @@ impl Scanner {
         if input.policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
+        self.check_line_limit(input.path, input.number, input.content.len())?;
         if !input.emit_findings {
             state.consume(input.path, input.content);
             return Ok(0);

@@ -157,6 +157,15 @@ Configuration is merged with built-in defaults as follows:
 - invalid regular expressions, globs, dates, date ranges, entropy values, and
   Git limits are fatal.
 
+Source files are read incrementally. Lines longer than 16 MiB fail operationally
+instead of exhausting memory or being skipped. Set `[limits] max_line_bytes` to
+increase this bound when needed; the limit excludes the line's CR/LF terminator.
+JSON findings use a private temporary spool so report memory does not grow with
+the total number of findings. Temporary-storage failures also fail the scan.
+The defaults also limit files to 64 MiB and each scan phase to 100,000 selected
+files. Set `limits.max_file_bytes` and `limits.max_files` to change these bounds.
+Git blob sizes are checked before patches are constructed.
+
 Example:
 
 ```toml

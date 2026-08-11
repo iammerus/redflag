@@ -14,6 +14,26 @@ pub struct Config {
     pub exclusions: Vec<ExclusionRule>,
     pub entropy: EntropyConfig,
     pub git: GitConfig,
+    pub limits: ScanLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScanLimits {
+    /// Maximum UTF-8 content bytes in one source line, excluding CR/LF.
+    pub max_line_bytes: usize,
+    pub max_file_bytes: u64,
+    pub max_files: usize,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_line_bytes: 16 * 1024 * 1024,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_files: 100_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -84,6 +104,7 @@ struct PartialConfig {
     exclusions: Vec<ExclusionRule>,
     entropy: Option<EntropyConfig>,
     git: Option<GitConfig>,
+    limits: Option<ScanLimits>,
 }
 
 impl Default for EntropyConfig {
@@ -364,6 +385,9 @@ impl Config {
             if let Some(git) = user.git {
                 config.git = git;
             }
+            if let Some(limits) = user.limits {
+                config.limits = limits;
+            }
         }
 
         config.validate()?;
@@ -372,6 +396,17 @@ impl Config {
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
         // Regexes and globs are validated by compiling them once in Scanner.
+        if self.limits.max_line_bytes == 0 || self.limits.max_line_bytes.checked_add(3).is_none() {
+            return Err(RedflagError::Config(
+                "limits.max_line_bytes must be positive and leave room for a line terminator"
+                    .to_string(),
+            ));
+        }
+        if self.limits.max_file_bytes == 0 || self.limits.max_files == 0 {
+            return Err(RedflagError::Config(
+                "limits.max_file_bytes and limits.max_files must be positive".to_string(),
+            ));
+        }
         if !(0.0..=8.0).contains(&self.entropy.threshold) {
             return Err(RedflagError::Config(
                 "Entropy threshold must be between 0.0 and 8.0".to_string(),
@@ -443,6 +478,7 @@ impl Default for Config {
             exclusions: default_exclusions(),
             entropy: EntropyConfig::default(),
             git: GitConfig::default(),
+            limits: ScanLimits::default(),
         }
     }
 }

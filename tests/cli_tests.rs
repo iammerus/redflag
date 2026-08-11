@@ -495,6 +495,92 @@ fn binary_classification_cannot_hide_history_content() {
 }
 
 #[test]
+fn streaming_input_limits_fail_without_partial_json() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("input.env");
+    let config = dir.path().join("redflag.toml");
+    fs::write(&config, "[limits]\nmax_line_bytes = 80\n").unwrap();
+    let first = format!("api_key=\"{}\"\n", synthetic_secret());
+    for (length, ending, expected) in [(80, "\n", 1), (80, "\r\n", 1), (81, "", 2)] {
+        fs::write(&file, format!("{first}{}{ending}", "a".repeat(length))).unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            file.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(output.status.code(), Some(expected));
+        if expected == 2 {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("line limit"));
+        } else {
+            let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(findings.as_array().unwrap().len(), 1);
+        }
+    }
+    // Invalid text after a finding must also leave the final report unpublished.
+    let mut invalid = first.into_bytes();
+    invalid.push(255);
+    fs::write(&file, invalid).unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        file.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn file_and_discovery_limits_are_operational_failures() {
+    let dir = tempdir().unwrap();
+    let settings = tempdir().unwrap();
+    let config = settings.path().join("redflag.toml");
+    fs::write(&config, "[limits]\nmax_file_bytes = 10\nmax_files = 2\n").unwrap();
+    let file = dir.path().join("large.txt");
+    fs::write(&file, "a\n".repeat(6)).unwrap();
+    let arguments = |path: &Path| {
+        redflag_with_args(&[
+            "scan",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+    };
+    let output = arguments(&file);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("file limit"));
+    fs::remove_file(file).unwrap();
+    for index in 0..3 {
+        fs::write(dir.path().join(format!("file-{index}.txt")), "safe").unwrap();
+    }
+    let output = arguments(dir.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("2-file limit"));
+    let history = trunk_repo_with_deleted_secret();
+    let output = redflag_with_args(&[
+        "scan",
+        history.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("secret.rs exceeds"));
+}
+
+#[test]
 fn history_preserves_template_context_before_diff_hunks() {
     let dir = tempdir().unwrap();
     let repo = Repository::init(dir.path()).unwrap();

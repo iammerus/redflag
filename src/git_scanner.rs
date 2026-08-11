@@ -90,6 +90,12 @@ fn scan_prepared_history<H: FindingHandler>(
         let commit_stats =
             process_commit(repo, &commit, scanner, handler, current, total, &short_hash)?;
         stats.files += commit_stats.files;
+        if stats.files > scanner.limits().max_files {
+            return Err(RedflagError::Incomplete(format!(
+                "Git history exceeds the {}-file limit. Narrow the range or increase limits.max_files.",
+                scanner.limits().max_files
+            )));
+        }
         stats.findings += commit_stats.findings;
     }
     handler.progress(ScanProgress::Finished {
@@ -169,6 +175,14 @@ fn process_commit<H: FindingHandler>(
             total,
             detail: format!("{short_hash} {}", path.display()),
         })?;
+        // Check object sizes without materializing large blobs or patches.
+        let odb = repo.odb()?;
+        for oid in [delta.old_file().id(), delta.new_file().id()] {
+            if !oid.is_zero() {
+                let (length, _) = odb.read_header(oid)?;
+                scanner.check_file_limit(path, length as u64)?;
+            }
+        }
         let patch = Patch::from_diff(&diff, delta_index)?.ok_or_else(|| {
             RedflagError::Incomplete(format!(
                 "Cannot inspect Git change {} in {short_hash}.",
@@ -367,6 +381,7 @@ mod tests {
         let mut handler = TestHandler::new();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![
                 SecretPattern {
                     name: "test-api-key".to_string(),
@@ -555,6 +570,7 @@ mod tests {
         .unwrap();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![SecretPattern {
                 name: "api-key".to_string(),
                 pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),
@@ -633,6 +649,7 @@ mod tests {
         .unwrap();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![SecretPattern {
                 name: "api-key".to_string(),
                 pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),
