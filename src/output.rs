@@ -267,6 +267,57 @@ impl OutputHandler {
         self.findings_count
     }
 
+    /// Versioned reports retain the disk spool used by the legacy source array.
+    pub fn finish_report(
+        &mut self,
+        mode: &str,
+        coverage: &impl serde::Serialize,
+    ) -> Result<(), RedflagError> {
+        self.clear_progress();
+        #[derive(serde::Serialize)]
+        struct Header<'a, T> {
+            schema_version: u32,
+            mode: &'a str,
+            complete: bool,
+            scanner_version: &'static str,
+            findings_count: usize,
+            coverage: &'a T,
+        }
+        let header = Header {
+            schema_version: 1,
+            mode,
+            complete: true,
+            scanner_version: env!("CARGO_PKG_VERSION"),
+            findings_count: self.findings_count,
+            coverage,
+        };
+        match self.format {
+            OutputFormat::Json => {
+                let mut bytes = serde_json::to_vec(&header)?;
+                bytes.pop(); // Replace the final object delimiter with findings.
+                if let Some(spool) = &mut self.json_spool {
+                    spool.flush()?;
+                    spool.seek(SeekFrom::Start(0))?;
+                }
+                self.writer.write_all(&bytes)?;
+                self.writer.write_all(b",\"findings\":[\n")?;
+                if let Some(spool) = &mut self.json_spool {
+                    io::copy(spool.get_mut(), &mut self.writer)?;
+                }
+                self.writer.write_all(b"\n]}\n")?;
+            }
+            OutputFormat::Text => {
+                writeln!(
+                    self.writer,
+                    "{mode} inspection complete: {} findings.",
+                    self.findings_count
+                )?;
+            }
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+
     fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
         if count == 1 {
             singular

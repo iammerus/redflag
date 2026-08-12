@@ -24,6 +24,8 @@ pub struct ScanLimits {
     pub max_line_bytes: usize,
     pub max_file_bytes: u64,
     pub max_files: usize,
+    /// Maximum total bytes selected for an artifact scan.
+    pub max_total_bytes: u64,
 }
 
 impl Default for ScanLimits {
@@ -32,6 +34,7 @@ impl Default for ScanLimits {
             max_line_bytes: 16 * 1024 * 1024,
             max_file_bytes: 64 * 1024 * 1024,
             max_files: 100_000,
+            max_total_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -402,9 +405,12 @@ impl Config {
                     .to_string(),
             ));
         }
-        if self.limits.max_file_bytes == 0 || self.limits.max_files == 0 {
+        if self.limits.max_file_bytes == 0
+            || self.limits.max_files == 0
+            || self.limits.max_total_bytes == 0
+        {
             return Err(RedflagError::Config(
-                "limits.max_file_bytes and limits.max_files must be positive".to_string(),
+                "limits.max_file_bytes, limits.max_files and limits.max_total_bytes must be positive".to_string(),
             ));
         }
         if !(0.0..=8.0).contains(&self.entropy.threshold) {

@@ -1,7 +1,9 @@
+mod artifacts;
 mod config;
 mod error;
 mod git_scanner;
 mod output;
+mod protected_values;
 mod scanner;
 mod suppression;
 
@@ -20,6 +22,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect every file selected for publication; exit 2 if inspection is incomplete
+    Artifacts {
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        #[arg(short, long, value_enum, default_value = "text")]
+        format: output::OutputFormat,
+        /// Match the exact value of this environment variable (repeat for each name)
+        #[arg(long, value_name = "NAME")]
+        private_env: Vec<String>,
+        /// Explicitly accept a declared private value shorter than 8 bytes
+        #[arg(long, value_name = "NAME")]
+        allow_short_private_value: Vec<String>,
+    },
     /// Scan directory for secrets
     Scan {
         #[arg(default_value = ".")]
@@ -73,6 +90,23 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, RedflagError> {
     match cli.command {
+        Commands::Artifacts {
+            paths,
+            config,
+            format,
+            private_env,
+            allow_short_private_value,
+        } => {
+            let config = Config::load(config)?;
+            let scanner = Scanner::with_config(config)?;
+            let protected =
+                protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
+            let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
+            let mut handler = OutputHandler::new(format, false);
+            let coverage = selected.scan(&scanner, &protected, &mut handler)?;
+            handler.finish_report("artifacts", &coverage)?;
+            Ok(u8::from(handler.findings_count() > 0))
+        }
         Commands::Scan {
             path,
             config,

@@ -479,6 +479,37 @@ impl Scanner {
             return Vec::new();
         }
 
+        self.detect_line(path, line_number, line, commit)
+    }
+
+    /// Inspect published content without source exclusions or comment directives.
+    /// Byte matching of declared values is handled before this text projection.
+    pub(crate) fn scan_artifact_line<H: FindingHandler>(
+        &self,
+        path: &Path,
+        line_number: usize,
+        bytes: &[u8],
+        handler: &mut H,
+    ) -> Result<usize, RedflagError> {
+        self.check_line_limit(path, line_number, bytes.len())?;
+        let line = String::from_utf8_lossy(bytes);
+        let findings = self.detect_line(path, line_number, &line, None);
+        let count = findings.len();
+        for mut finding in findings {
+            // Nearby opaque private values must never appear as context.
+            finding.snippet = "[REDACTED]".into();
+            handler.handle(finding)?;
+        }
+        Ok(count)
+    }
+
+    fn detect_line(
+        &self,
+        path: &Path,
+        line_number: usize,
+        line: &str,
+        commit: Option<&CommitMetadata>,
+    ) -> Vec<Finding> {
         let mut detections: Vec<Detection<'_>> = Vec::new();
         let mut builtin_indices: HashMap<(usize, usize), usize> = HashMap::new();
         for pattern in &self.patterns {
