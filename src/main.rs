@@ -2,6 +2,7 @@ mod artifacts;
 mod config;
 mod error;
 mod git_scanner;
+mod manifest;
 mod output;
 mod protected_values;
 mod scanner;
@@ -36,6 +37,18 @@ enum Commands {
         /// Explicitly accept a declared private value shorter than 8 bytes
         #[arg(long, value_name = "NAME")]
         allow_short_private_value: Vec<String>,
+        /// Write a clean-scan manifest outside the selected publication inputs
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+    },
+    /// Verify that publication inputs still match a clean artifact scan
+    VerifyArtifacts {
+        manifest: PathBuf,
+        /// Replacement publication root (repeat in original target order)
+        #[arg(long, value_name = "PATH")]
+        target: Vec<PathBuf>,
+        #[arg(short, long, value_enum, default_value = "text")]
+        format: output::OutputFormat,
     },
     /// Scan directory for secrets
     Scan {
@@ -96,16 +109,42 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             format,
             private_env,
             allow_short_private_value,
+            manifest,
         } => {
+            let manifest_output = manifest
+                .as_ref()
+                .map(|path| manifest::ManifestOutput::prepare(path, &paths))
+                .transpose()?;
             let config = Config::load(config)?;
+            let config_sha256 = artifacts::digest(&serde_json::to_vec(&config)?);
             let scanner = Scanner::with_config(config)?;
             let protected =
                 protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
             let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
             let mut handler = OutputHandler::new(format, false);
             let coverage = selected.scan(&scanner, &protected, &mut handler)?;
-            handler.finish_report("artifacts", &coverage)?;
-            Ok(u8::from(handler.findings_count() > 0))
+            let exit = u8::from(handler.findings_count() > 0);
+            if exit == 0 {
+                if let Some(manifest) = manifest_output {
+                    manifest.write(&coverage, config_sha256)?;
+                }
+            }
+            if let Err(error) = handler.finish_report("artifacts", &coverage) {
+                if let Some(path) = manifest {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+            Ok(exit)
+        }
+        Commands::VerifyArtifacts {
+            manifest,
+            target,
+            format,
+        } => {
+            let verification = manifest::verify(&manifest, &target)?;
+            OutputHandler::new(format, false).finish_report("verify_artifacts", &verification)?;
+            Ok(0)
         }
         Commands::Scan {
             path,

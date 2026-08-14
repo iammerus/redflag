@@ -13,21 +13,21 @@ use std::{
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArtifactTarget {
     pub root: PathBuf,
     pub kind: TargetKind,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TargetKind {
     File,
     Directory,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArtifactFile {
     pub target: usize,
@@ -50,7 +50,7 @@ pub(crate) struct ArtifactCoverage {
 
 pub(crate) struct ArtifactSet {
     pub targets: Vec<ArtifactTarget>,
-    files: Vec<(usize, PathBuf)>,
+    pub(crate) files: Vec<(usize, PathBuf)>,
 }
 
 impl ArtifactSet {
@@ -182,8 +182,52 @@ impl ArtifactSet {
                 sha256: digest(&bytes),
             });
         }
+        // Detect inventory or content changes during inspection before declaring
+        // completeness. Publication still needs its own verification afterwards.
+        verify_inventory(&coverage.targets, &coverage.files, &coverage.limits)?;
         Ok(coverage)
     }
+}
+
+pub(crate) fn verify_inventory(
+    targets: &[ArtifactTarget],
+    expected: &[ArtifactFile],
+    limits: &ScanLimits,
+) -> Result<u64, RedflagError> {
+    let paths: Vec<_> = targets.iter().map(|target| target.root.clone()).collect();
+    let current = ArtifactSet::collect(&paths, limits)?;
+    if current.targets != targets
+        || current.files.len() != expected.len()
+        || current
+            .files
+            .iter()
+            .zip(expected)
+            .any(|((target, path), file)| *target != file.target || path != &file.path)
+    {
+        return Err(RedflagError::Incomplete(
+            "Artifact inventory changed. Scan the exact publication inputs again.".into(),
+        ));
+    }
+    let mut total = 0u64;
+    for file in expected {
+        let path = file_path(&targets[file.target], &file.path);
+        let bytes = read_file(&path, limits)?;
+        if bytes.len() as u64 != file.bytes || digest(&bytes) != file.sha256 {
+            return Err(RedflagError::Incomplete(format!(
+                "Artifact {} changed. Scan the publication inputs again.",
+                path.display()
+            )));
+        }
+        total = total
+            .checked_add(file.bytes)
+            .filter(|&total| total <= limits.max_total_bytes)
+            .ok_or_else(|| {
+                RedflagError::Incomplete(
+                    "Artifact bytes exceed limits.max_total_bytes during verification".into(),
+                )
+            })?;
+    }
+    Ok(total)
 }
 
 fn metadata(path: &Path) -> Result<fs::Metadata, RedflagError> {

@@ -39,7 +39,7 @@ fn incomplete(output: &Output) {
 }
 
 fn provider_token() -> String {
-    ["ghp_", "abcdefghijklmnopqrstuvwxyz", "1234567890AB"].concat()
+    ["ghp_", "abcdefghijklmnopqrstuvwxyz", "1234567890"].concat()
 }
 
 #[test]
@@ -253,4 +253,169 @@ fn artifact_limits_are_explicit_and_fail_before_json_output() {
         )["coverage"]["total_bytes"],
         10
     );
+}
+
+fn verify(manifest: &Path, targets: &[&Path]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
+    command
+        .arg("verify-artifacts")
+        .arg(manifest)
+        .args(["--format", "json"]);
+    for target in targets {
+        command.arg("--target").arg(target);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn clean_manifest_verifies_original_and_relocated_bytes() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let upload = dir.path().join("upload");
+    fs::create_dir(&dist).unwrap();
+    fs::create_dir(&upload).unwrap();
+    for root in [&dist, &upload] {
+        fs::write(root.join("index.html"), "<h1>Hello</h1>").unwrap();
+        fs::write(root.join(".empty"), "").unwrap();
+    }
+    let manifest = dir.path().join("manifest.json");
+    report(
+        &scan(
+            &dist,
+            &[
+                "--manifest",
+                manifest.to_str().unwrap(),
+                "--private-env",
+                "RF_MANIFEST",
+            ],
+            &[("RF_MANIFEST", "unpublished-private-value")],
+        ),
+        0,
+    );
+    let text = fs::read_to_string(&manifest).unwrap();
+    assert!(!text.contains("unpublished-private-value"));
+    let result = report(&verify(&manifest, &[]), 0);
+    assert_eq!(result["mode"], "verify_artifacts");
+    assert_eq!(result["coverage"]["files"], 2);
+    report(&verify(&manifest, &[&upload]), 0);
+    // Metadata-only changes do not invalidate byte identity.
+    fs::write(upload.join("index.html"), "<h1>Hello</h1>").unwrap();
+    report(&verify(&manifest, &[&upload]), 0);
+}
+
+#[test]
+fn changed_added_removed_and_retyped_files_invalidate_manifest() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    let file = dist.join("data");
+    fs::write(&file, "hello").unwrap();
+    let manifest = dir.path().join("manifest.json");
+    report(
+        &scan(&dist, &["--manifest", manifest.to_str().unwrap()], &[]),
+        0,
+    );
+    fs::write(&file, "world").unwrap(); // Same size, different digest.
+    incomplete(&verify(&manifest, &[]));
+    fs::write(&file, "hello").unwrap();
+    fs::write(dist.join("extra"), "").unwrap();
+    incomplete(&verify(&manifest, &[]));
+    fs::remove_file(dist.join("extra")).unwrap();
+    fs::remove_file(&file).unwrap();
+    incomplete(&verify(&manifest, &[]));
+    fs::create_dir(&file).unwrap();
+    fs::write(file.join("replacement"), "hello").unwrap();
+    incomplete(&verify(&manifest, &[]));
+}
+
+#[test]
+fn failed_rescans_invalidate_prior_manifest_without_destroying_input() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    let file = dist.join("data");
+    fs::write(&file, "hello").unwrap();
+    let manifest = dir.path().join("manifest.json");
+    let args = ["--manifest", manifest.to_str().unwrap()];
+    report(&scan(&dist, &args, &[]), 0);
+    fs::write(&file, provider_token()).unwrap();
+    report(&scan(&dist, &args, &[]), 1);
+    assert!(!manifest.exists());
+    fs::write(&manifest, "stale").unwrap();
+    incomplete(&scan(
+        &dist,
+        &[
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--config",
+            "missing-policy.toml",
+        ],
+        &[],
+    ));
+    assert!(!manifest.exists());
+    fs::write(&manifest, "stale").unwrap();
+    incomplete(&scan(&dist.join("missing"), &args, &[]));
+    assert!(!manifest.exists());
+    incomplete(&scan(&dist, &["--manifest", file.to_str().unwrap()], &[]));
+    assert_eq!(fs::read_to_string(file).unwrap(), provider_token());
+}
+
+#[test]
+fn malformed_and_unsafe_manifests_are_rejected() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    fs::write(dist.join("data"), "hello").unwrap();
+    let manifest = dir.path().join("manifest.json");
+    report(
+        &scan(&dist, &["--manifest", manifest.to_str().unwrap()], &[]),
+        0,
+    );
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    for (field, value) in [
+        ("schema_version", serde_json::json!(999)),
+        ("complete", serde_json::json!(false)),
+        ("findings_count", serde_json::json!(1)),
+        ("total_bytes", serde_json::json!(6)),
+    ] {
+        let mut bad = original.clone();
+        bad[field] = value;
+        fs::write(&manifest, serde_json::to_vec(&bad).unwrap()).unwrap();
+        incomplete(&verify(&manifest, &[]));
+    }
+    for path in ["../outside", "/absolute/path", ""] {
+        let mut bad = original.clone();
+        bad["files"][0]["path"] = path.into();
+        fs::write(&manifest, serde_json::to_vec(&bad).unwrap()).unwrap();
+        incomplete(&verify(&manifest, &[]));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_verification_rejects_symlink_replacements() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    let file = dist.join("data");
+    fs::write(&file, "hello").unwrap();
+    let manifest = dir.path().join("manifest.json");
+    report(
+        &scan(&dist, &["--manifest", manifest.to_str().unwrap()], &[]),
+        0,
+    );
+    let outside = dir.path().join("outside");
+    fs::rename(&file, &outside).unwrap();
+    symlink(&outside, &file).unwrap();
+    incomplete(&verify(&manifest, &[]));
+    let manifest_link = dir.path().join("link");
+    symlink(&manifest, &manifest_link).unwrap();
+    incomplete(&scan(
+        &dist,
+        &["--manifest", manifest_link.to_str().unwrap()],
+        &[],
+    ));
+    assert!(manifest.exists());
 }

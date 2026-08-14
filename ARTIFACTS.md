@@ -48,3 +48,39 @@ limits with `--config policy.toml` after reviewing the expected build size.
 Artifact inspection holds one bounded file in memory and spools JSON findings to
 a private temporary file. Content digests describe exactly the bytes inspected;
 they do not establish that a later publish step used the same bytes.
+
+## Verify the bytes that will be uploaded
+
+```sh
+redflag artifacts dist --private-env INTERNAL_API_KEY --manifest scan-manifest.json
+redflag verify-artifacts scan-manifest.json
+# Publish dist only if both commands succeed, without rebuilding it in between.
+```
+
+Store the manifest outside every selected artifact target. It is written atomically
+only after a complete scan without findings. Requesting the same manifest for a
+rescan invalidates the old file before configuration or input validation, so a
+failed rescan cannot leave the previous clean result available. Artifact scans
+recheck inventory and hashes before reporting completion to catch changes during
+inspection.
+
+If publication consumes a copied directory, verify that directory explicitly:
+
+```sh
+redflag verify-artifacts scan-manifest.json --target upload-directory
+```
+
+Repeat `--target` in the original selection order for multiple targets. Verification
+requires the same relative file inventory and SHA-256 for every file, including
+empty files. Added, removed, changed or retyped files fail with exit 2. Metadata
+changes such as timestamps do not affect byte identity. The manifest records
+scanner/engine versions, the effective configuration digest and declared variable
+names; verification does not need the private environment values again.
+
+Keep the manifest in a trusted workflow workspace: it is an integrity record,
+not a signed attestation, and an edited manifest cannot prove a scan happened.
+Verification describes inputs at verification time. Run it immediately before
+publication and prevent concurrent rebuilds or mutations; a standalone command
+cannot control what a subsequent uploader chooses to read. Only the representations
+listed in the manifest were inspected. This does not imply arbitrary compression
+or encoding was decoded.
