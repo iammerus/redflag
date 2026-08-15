@@ -29,6 +29,9 @@ enum Commands {
         paths: Vec<PathBuf>,
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// Use built-in defaults without discovering redflag.toml
+        #[arg(long, conflicts_with = "config")]
+        no_config: bool,
         #[arg(short, long, value_enum, default_value = "text")]
         format: output::OutputFormat,
         /// Match the exact value of this environment variable (repeat for each name)
@@ -50,6 +53,17 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "text")]
         format: output::OutputFormat,
     },
+    /// Show the resolved, merged and validated policy for a source target
+    ShowConfig {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        #[arg(long, conflicts_with = "config")]
+        no_config: bool,
+        #[arg(short, long, value_enum, default_value = "text")]
+        format: output::OutputFormat,
+    },
     /// Scan directory for secrets
     Scan {
         #[arg(default_value = ".")]
@@ -57,6 +71,9 @@ enum Commands {
 
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// Use built-in defaults without discovering redflag.toml
+        #[arg(long, conflicts_with = "config")]
+        no_config: bool,
 
         #[arg(short, long, value_enum, default_value = "text")]
         format: output::OutputFormat,
@@ -106,6 +123,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
         Commands::Artifacts {
             paths,
             config,
+            no_config,
             format,
             private_env,
             allow_short_private_value,
@@ -115,7 +133,8 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
                 .as_ref()
                 .map(|path| manifest::ManifestOutput::prepare(path, &paths))
                 .transpose()?;
-            let config = Config::load(config)?;
+            let config_path = Config::resolve_path(config, &std::env::current_dir()?, no_config)?;
+            let config = Config::load(config_path)?;
             let config_sha256 = artifacts::digest(&serde_json::to_vec(&config)?);
             let scanner = Scanner::with_config(config)?;
             let protected =
@@ -146,9 +165,54 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             OutputHandler::new(format, false).finish_report("verify_artifacts", &verification)?;
             Ok(0)
         }
+        Commands::ShowConfig {
+            path,
+            config,
+            no_config,
+            format,
+        } => {
+            let config_path = Config::resolve_path(config, &path, no_config)?;
+            let effective = Config::load(config_path.clone())?;
+            let _scanner = Scanner::with_config(effective.clone())?;
+            #[derive(serde::Serialize)]
+            struct EffectiveConfig {
+                schema_version: u32,
+                config_path: Option<PathBuf>,
+                sha256: String,
+                effective: Config,
+            }
+            let report = EffectiveConfig {
+                schema_version: 1,
+                config_path,
+                sha256: artifacts::digest(&serde_json::to_vec(&effective)?),
+                effective,
+            };
+            let stdout = std::io::stdout();
+            let mut writer = stdout.lock();
+            use std::io::Write;
+            match format {
+                output::OutputFormat::Json => serde_json::to_writer_pretty(&mut writer, &report)?,
+                output::OutputFormat::Text => {
+                    writeln!(
+                        writer,
+                        "# Configuration: {}",
+                        report
+                            .config_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "built-in defaults".into())
+                    )?;
+                    writeln!(writer, "# SHA-256: {}", report.sha256)?;
+                    writer.write_all(toml::to_string_pretty(&report.effective)?.as_bytes())?;
+                }
+            }
+            writeln!(writer)?;
+            Ok(0)
+        }
         Commands::Scan {
             path,
             config,
+            no_config,
             format,
             show_secrets,
             no_progress,
@@ -157,20 +221,23 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             git_since,
             git_until,
             git_branches,
-        } => run_scan(
-            path,
-            config,
-            format,
-            show_secrets,
-            no_progress,
-            git_history,
-            GitScanOptions {
-                max_depth: git_max_depth,
-                branches: git_branches,
-                since_date: git_since,
-                until_date: git_until,
-            },
-        ),
+        } => {
+            let config_path = Config::resolve_path(config, Path::new(&path), no_config)?;
+            run_scan(
+                path,
+                config_path,
+                format,
+                show_secrets,
+                no_progress,
+                git_history,
+                GitScanOptions {
+                    max_depth: git_max_depth,
+                    branches: git_branches,
+                    since_date: git_since,
+                    until_date: git_until,
+                },
+            )
+        }
         Commands::GenerateConfig { path } => {
             generate_default_config(&path)?;
             Ok(0)

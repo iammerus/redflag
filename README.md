@@ -1,8 +1,8 @@
 # Redflag 🚩
 
-Redflag is a small, cross-platform CLI for finding secrets in source files and
-Git history. It combines regular-expression rules for known credential formats
-with heuristic Shannon entropy checks.
+Redflag finds credentials in source files, Git history and files selected for
+publication. Artifact scans also match explicitly declared private build values
+and can verify that upload inputs match the bytes that were scanned.
 
 [![CI](https://github.com/iammerus/redflag/actions/workflows/ci.yml/badge.svg)](https://github.com/iammerus/redflag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iammerus/redflag)](https://github.com/iammerus/redflag/releases/latest)
@@ -30,8 +30,16 @@ redflag scan . --git-history
 
 # Create and use a configuration file
 redflag generate-config redflag.toml
-redflag scan . --config redflag.toml
+redflag show-config .
+redflag scan .
+
+# Check all publication files and a private value already present in this build
+redflag artifacts dist --private-env INTERNAL_API_KEY --manifest scan-manifest.json
+redflag verify-artifacts scan-manifest.json
 ```
+
+See [ARTIFACTS.md](ARTIFACTS.md) for strict target selection, private-value matching,
+manifests and checks before publication.
 
 ## GitHub Action
 
@@ -90,8 +98,8 @@ those values. Overlapping built-in rules for the same literal produce one findin
 | `2` | Arguments, configuration, input, output, or Git caused an operational failure |
 
 stdout contains only the selected report format. Errors, warnings, and progress
-belong on stderr. JSON output is one valid array for clean and finding-producing
-scans.
+belong on stderr. Source `scan` JSON remains an array. `artifacts` and
+`verify-artifacts` use a versioned object with coverage and findings.
 
 Interactive scans show a single-line progress bar on stderr. Redirected output
 and CI stay quiet automatically. Use `--no-progress` to disable progress in a
@@ -111,6 +119,7 @@ redflag scan [PATH]
 | Option | Purpose |
 | --- | --- |
 | `-c, --config <FILE>` | Load a TOML configuration |
+| `--no-config` | Use defaults without automatic policy discovery |
 | `-f, --format <text\|json>` | Select text or JSON output |
 | `--show-secrets` | Include raw matched values |
 | `--no-progress` | Disable interactive progress output |
@@ -146,13 +155,31 @@ Generate a complete starting file:
 redflag generate-config redflag.toml
 ```
 
+Without `--config`, source scans find the nearest `redflag.toml` starting at the
+selected directory (or the parent of a selected file), stopping after checking
+the Git repository root. Outside Git, discovery stops at the filesystem root.
+The nearest file is merged with built-in defaults; parent policies are not layered.
+Artifact scans start discovery at the current workflow directory, so a config
+file inside generated output cannot select the scan's policy.
+
+Inspect the resolved policy without scanning:
+
+```sh
+redflag show-config . --format json
+```
+
+The output includes the selected path, merged settings and SHA-256 of the effective
+configuration. Text output is a reusable TOML file with provenance comments.
+Both modes validate regexes and globs before output. Unknown top-level sections
+are errors, so a misspelled section cannot silently leave defaults active.
+
 Configuration is merged with built-in defaults as follows:
 
 - a user pattern replaces a built-in pattern with the same name, otherwise it
   is appended;
 - extensions extend the defaults and are deduplicated without regard to case;
-- exclusions extend the defaults, with exact duplicates removed;
-- a present `[entropy]` or `[git]` section replaces that section after omitted
+- exclusions extend the defaults, keeping the last occurrence of exact duplicates;
+- a present `[entropy]`, `[git]` or `[limits]` section replaces that section after omitted
   fields receive documented defaults;
 - invalid regular expressions, globs, dates, date ranges, entropy values, and
   Git limits are fatal.

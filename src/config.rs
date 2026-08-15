@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -98,6 +98,7 @@ pub struct EntropyConfig {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PartialConfig {
     #[serde(default)]
     patterns: Vec<SecretPattern>,
@@ -350,6 +351,56 @@ impl Default for GitConfig {
 }
 
 impl Config {
+    /// Find the nearest policy up to the repository boundary. Callers choose the
+    /// search origin: source target for source scans, cwd for publication scans.
+    pub fn resolve_path(
+        explicit: Option<PathBuf>,
+        start: &Path,
+        no_config: bool,
+    ) -> Result<Option<PathBuf>, RedflagError> {
+        if let Some(path) = explicit {
+            return fs::canonicalize(&path)
+                .map(Some)
+                .map_err(|source| RedflagError::PathIo { path, source });
+        }
+        if no_config {
+            return Ok(None);
+        }
+        let mut directory = fs::canonicalize(start).map_err(|source| RedflagError::PathIo {
+            path: start.to_path_buf(),
+            source,
+        })?;
+        if directory.is_file() {
+            directory.pop();
+        }
+        loop {
+            let candidate = directory.join("redflag.toml");
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => return Ok(Some(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(RedflagError::PathIo {
+                        path: candidate,
+                        source,
+                    })
+                }
+            }
+            match fs::symlink_metadata(directory.join(".git")) {
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(RedflagError::PathIo {
+                        path: directory.join(".git"),
+                        source,
+                    })
+                }
+            }
+            if !directory.pop() {
+                return Ok(None);
+            }
+        }
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self, RedflagError> {
         let mut config = Config::default();
 

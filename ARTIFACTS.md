@@ -21,6 +21,12 @@ and special files are rejected. Target roots are resolved to absolute paths;
 overlapping targets are rejected. Missing, unreadable and zero-byte targets fail.
 An empty file within a nonempty directory is still inspected and inventoried.
 
+Artifact policy discovery starts at the current workflow directory and searches
+for the nearest `redflag.toml` up to the Git repository root (or filesystem root
+outside Git). It does not search inside selected output directories. Use
+`--config FILE` for an explicit trusted policy or `--no-config` for defaults.
+`redflag show-config .` displays the effective policy for that workflow directory.
+
 Private values are matched case-sensitively against original bytes, including
 invalid UTF-8, NULs, multiline values, overlaps and read-buffer boundaries. Missing,
 empty or non-Unicode environment values fail. Values shorter than eight bytes
