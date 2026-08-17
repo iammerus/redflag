@@ -1,0 +1,6 @@
+# Betterleaks 1.8.1's reviewed default rules, with file selection owned by Redflag.
+# Validation is also disabled explicitly by the subprocess invocation.
+title = "Redflag offline detection"
+prefilter = "false"
+[extend]
+useDefault = true
