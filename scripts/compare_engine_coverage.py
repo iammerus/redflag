@@ -48,7 +48,7 @@ def fixtures():
         'secret-boolean': 'const secret = true;',
         'secret-null': 'const secret = null;',
         'pipeline-reference': 'env: { API_TOKEN: "${{ secrets.BUILD_TOKEN }}" }',
-        'template-reference': 'password = "{{ lookup_password(service) }}"',
+        'template-reference': 'password = ' + '"{{ lookup_password(service) }}"',
         'json-schema': '{"password":{"type":"string","minLength":12}}',
         'build-placeholder': 'window.PUBLIC_KEY = "replace-with-your-public-key";',
     }

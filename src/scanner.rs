@@ -215,6 +215,15 @@ impl Scanner {
         self
     }
 
+    pub fn for_external_engine(mut self) -> Self {
+        // Preserve explicit TOML rules and the format-specific netrc check,
+        // which the pinned general engine does not currently cover.
+        self.patterns
+            .retain(|pattern| !pattern.builtin || pattern.rule.name == "Netrc Password");
+        self.entropy_config.enabled = false;
+        self
+    }
+
     pub(crate) fn limits(&self) -> &ScanLimits {
         &self.limits
     }

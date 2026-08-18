@@ -14,6 +14,20 @@ and **2** for an operational failure or incomplete inspection. Check the exit co
 before uploading. An error leaves JSON stdout empty. Text output can show findings
 before a later failure, so text output alone is not a completion signal.
 
+Artifact scans use pinned Betterleaks 1.8.1 for general credentials, Redflag's
+native matcher for declared private values, and existing custom TOML rules plus
+the `.netrc` format check. Install the engine beside the Redflag executable:
+
+```sh
+python3 scripts/install_engine.py --directory target/release/engines
+```
+
+Alternatively, supply `--betterleaks-path PATH` or `REDFLAG_BETTERLEAKS_PATH`.
+Redflag checks the executable's pinned SHA-256 before running it. A missing or
+modified engine fails with exit 2; scanning never downloads or updates an engine.
+`--engine native` selects the legacy general detector explicitly. The existing
+`scan` command retains its native rules and JSON array contract.
+
 Artifact selection includes hidden files, HTML, unknown extensions and files under
 directories normally excluded from source scans. Source exclusions, allow rules
 and inline suppression directives do not apply. Symlinks (including broken links)
@@ -35,16 +49,29 @@ declare up to 256 values, each at most 65,536 bytes. Unnamed environment variabl
 are never inspected. Every artifact finding has a fully redacted snippet, including
 native findings next to opaque private values.
 
-The current native detector also inspects each line through a UTF-8 projection
-that replaces invalid sequences. It does not interpret arbitrary binary formats.
-The report distinguishes this representation from exact raw-byte matching.
-Decoding and archive inspection are separate modernization work; this version
-does not certify transformed or compressed contents as inspected.
+The general engine receives private temporary snapshots with a leading newline
+and neutral filenames, so upstream filename and binary-type skips cannot silently
+reduce coverage. Snapshots use 64 KiB windows with 32 KiB overlap; original line
+locations are restored and overlap duplicates are removed. Candidates touching a
+window edge are checked with adjacent context; unusually long candidates that
+cannot be inspected completely fail operationally. Native custom rules inspect
+each original line through a UTF-8 projection with invalid sequences replaced.
+Exact private-value matching always sees original raw bytes without these windows.
+
+Live validation, upstream decoding and archive traversal are disabled explicitly.
+The child environment is cleared except for fixed runtime limits and Windows OS
+locations needed on Windows. Source engine config files, ignore files and inline
+allow comments cannot change the pinned policy. A clean engine exit is accepted
+only when its inspected-byte counter matches every staged byte and it has no
+unexpected warning or error. Engine logs and secret captures are never forwarded.
+Decoding and archive inspection remain separate modernization work; transformed
+or compressed inner content is not yet certified as inspected.
 
 Artifact JSON uses a version 1 envelope with mode, completion status, scanner
 version, findings count, coverage and findings. Coverage includes resolved targets,
 every selected file's relative path, size and SHA-256, selected private variable
-names, resource limits and representations. It contains no private values. The
+names, resource limits, representations, engine version and executable/config
+digests. It contains no private values. The
 existing `scan --format json` array remains compatible.
 
 Default limits in `[limits]` are 100,000 files, 64 MiB per file, 16 MiB per line,
@@ -52,7 +79,11 @@ and 1 GiB of total artifact bytes (`max_files`, `max_file_bytes`, `max_line_byte
 `max_total_bytes`). Exceeding a limit is an error, never a silent skip. Override
 limits with `--config policy.toml` after reviewing the expected build size.
 Artifact inspection holds one bounded file in memory and spools JSON findings to
-a private temporary file. Content digests describe exactly the bytes inspected;
+a private temporary file. Engine snapshots require up to roughly twice the selected
+input bytes in temporary storage, plus per-file overhead. The engine has a default
+120-second subprocess timeout (`limits.engine_timeout_seconds`), a 64 MiB report
+limit and a 4 MiB log limit; exceeding any budget fails the scan. Its Go runtime
+uses a 256 MiB soft memory target and two execution threads. Content digests describe exactly the bytes inspected;
 they do not establish that a later publish step used the same bytes.
 
 ## Verify the bytes that will be uploaded
@@ -82,6 +113,7 @@ empty files. Added, removed, changed or retyped files fail with exit 2. Metadata
 changes such as timestamps do not affect byte identity. The manifest records
 scanner/engine versions, the effective configuration digest and declared variable
 names; verification does not need the private environment values again.
+Manifests now use schema version 2 and include the pinned detector identity.
 
 Keep the manifest in a trusted workflow workspace: it is an integrity record,
 not a signed attestation, and an edited manifest cannot prove a scan happened.

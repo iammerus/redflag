@@ -28,8 +28,11 @@ def install(directory, archive_path=None):
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / name
     if destination.is_file() and digest(destination.read_bytes()) == asset['binary_sha256']:
+        destination.chmod(0o755)
         return destination
     if archive_path:
+        if archive_path.stat().st_size > 128 * 1024 * 1024:
+            raise ValueError('Betterleaks archive exceeds the 128 MiB size limit')
         data = archive_path.read_bytes()
     else:
         with urllib.request.urlopen(asset['url'], timeout=60) as response:

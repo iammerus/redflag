@@ -26,6 +26,7 @@ pub struct ScanLimits {
     pub max_files: usize,
     /// Maximum total bytes selected for an artifact scan.
     pub max_total_bytes: u64,
+    pub engine_timeout_seconds: u64,
 }
 
 impl Default for ScanLimits {
@@ -35,6 +36,7 @@ impl Default for ScanLimits {
             max_file_bytes: 64 * 1024 * 1024,
             max_files: 100_000,
             max_total_bytes: 1024 * 1024 * 1024,
+            engine_timeout_seconds: 120,
         }
     }
 }
@@ -449,6 +451,11 @@ impl Config {
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
+        if self.limits.engine_timeout_seconds == 0 {
+            return Err(RedflagError::Config(
+                "limits.engine_timeout_seconds must be positive".into(),
+            ));
+        }
         // Regexes and globs are validated by compiling them once in Scanner.
         if self.limits.max_line_bytes == 0 || self.limits.max_line_bytes.checked_add(3).is_none() {
             return Err(RedflagError::Config(

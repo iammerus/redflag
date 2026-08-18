@@ -14,7 +14,11 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
+      - name: Install checksum-verified offline engine for integration tests
+        run: |
+          python3 scripts/test_install_engine.py
+          python3 scripts/install_engine.py --directory target/debug/engines
+      - run: cargo test --locked --all-targets -- --include-ignored
       - run: cargo build --release
       - name: Self-scan with Redflag action
         uses: ./

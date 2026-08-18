@@ -1,5 +1,6 @@
 mod artifacts;
 mod config;
+mod engine;
 mod error;
 mod git_scanner;
 mod manifest;
@@ -43,6 +44,12 @@ enum Commands {
         /// Write a clean-scan manifest outside the selected publication inputs
         #[arg(long, value_name = "FILE")]
         manifest: Option<PathBuf>,
+        /// General credential detector; native retains the legacy rule behavior
+        #[arg(long, value_enum, default_value = "betterleaks")]
+        engine: engine::EngineChoice,
+        /// Path to the checksum-verified pinned Betterleaks executable
+        #[arg(long)]
+        betterleaks_path: Option<PathBuf>,
     },
     /// Verify that publication inputs still match a clean artifact scan
     VerifyArtifacts {
@@ -128,6 +135,8 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             private_env,
             allow_short_private_value,
             manifest,
+            engine: engine_choice,
+            betterleaks_path,
         } => {
             let manifest_output = manifest
                 .as_ref()
@@ -136,12 +145,21 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             let config_path = Config::resolve_path(config, &std::env::current_dir()?, no_config)?;
             let config = Config::load(config_path)?;
             let config_sha256 = artifacts::digest(&serde_json::to_vec(&config)?);
-            let scanner = Scanner::with_config(config)?;
+            let engine = engine::GeneralEngine::prepare(
+                engine_choice,
+                betterleaks_path,
+                config.limits.engine_timeout_seconds,
+                config_sha256.clone(),
+            )?;
+            let mut scanner = Scanner::with_config(config)?;
+            if engine_choice == engine::EngineChoice::Betterleaks {
+                scanner = scanner.for_external_engine();
+            }
             let protected =
                 protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
             let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
             let mut handler = OutputHandler::new(format, false);
-            let coverage = selected.scan(&scanner, &protected, &mut handler)?;
+            let coverage = selected.scan(&scanner, &protected, engine, &mut handler)?;
             let exit = u8::from(handler.findings_count() > 0);
             if exit == 0 {
                 if let Some(manifest) = manifest_output {

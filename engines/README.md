@@ -23,5 +23,23 @@ path prefilter: Redflag owns selection and completeness. `report.tmpl` emits onl
 rule and location fields, so source snippets, secret captures and validation
 metadata cannot enter the normalized report.
 
+Two narrow GitHub rule overrides preserve complete-token boundaries instead of
+accepting a fixed-length prefix of a longer identifier. Custom Redflag TOML rules
+remain native, and the existing native `.netrc` check is retained because Betterleaks
+1.8.1 misses that format in the preserved research corpus. Native entropy and the
+remaining built-in provider catalogue do not run alongside Betterleaks.
+
 Engine upgrades require reviewed checksum pins and the coverage, completeness
 and redaction regression tests. Do not change pins to accept an arbitrary binary.
+
+Real-engine integration tests cover hidden/unknown/binary inputs, untrusted
+environment/config isolation, overlap and Unicode locations, provider boundaries,
+redaction, native custom rules and version 2 manifests. Run them with:
+
+```sh
+python3 scripts/install_engine.py --directory target/debug/engines
+cargo test --locked --all-targets -- --include-ignored
+```
+
+CI installs the pinned engine and includes these tests. Ordinary offline unit-test
+runs can omit the four explicitly marked external-engine tests.

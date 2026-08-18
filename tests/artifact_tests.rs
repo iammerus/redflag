@@ -9,6 +9,7 @@ fn scan(path: &Path, args: &[&str], vars: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
     command
         .arg("artifacts")
+        .args(["--engine", "native"])
         .arg(path)
         .args(["--format", "json"])
         .args(args);
@@ -142,6 +143,7 @@ fn private_values_are_absent_even_from_nearby_native_snippets() {
     for format in ["json", "text"] {
         let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
             .arg("artifacts")
+            .args(["--engine", "native"])
             .arg(&file)
             .args(["--format", format, "--private-env", "RF_PRIVATE"])
             .env("RF_PRIVATE", private)

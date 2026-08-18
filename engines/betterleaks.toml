@@ -4,3 +4,13 @@ title = "Redflag offline detection"
 prefilter = "false"
 [extend]
 useDefault = true
+
+# Preserve Redflag's complete-token contract. Upstream 1.8.1 matches these
+# fixed-length prefixes inside longer identifiers without word boundaries.
+[[rules]]
+id = "github-pat"
+regex = '''\bghp_[0-9a-zA-Z]{36}\b'''
+
+[[rules]]
+id = "github-fine-grained-pat"
+regex = '''\bgithub_pat_\w{82}\b'''

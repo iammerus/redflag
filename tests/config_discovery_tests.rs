@@ -6,11 +6,12 @@ use std::{
 use tempfile::tempdir;
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_redflag"))
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .unwrap()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
+    command.current_dir(cwd).args(args);
+    if args.first() == Some(&"artifacts") {
+        command.args(["--engine", "native"]);
+    }
+    command.output().unwrap()
 }
 
 fn show(cwd: &Path, path: &Path, args: &[&str]) -> serde_json::Value {

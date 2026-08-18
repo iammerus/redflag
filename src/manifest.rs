@@ -1,6 +1,7 @@
 use crate::{
     artifacts::{self, ArtifactCoverage, ArtifactFile, ArtifactTarget},
     config::{Config, ScanLimits},
+    engine::EngineInfo,
     error::RedflagError,
 };
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -20,6 +21,7 @@ struct Manifest {
     schema_version: u32,
     scanner_version: String,
     engine: String,
+    detector: EngineInfo,
     config_sha256: String,
     complete: bool,
     findings_count: usize,
@@ -89,7 +91,8 @@ impl ManifestOutput {
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             scanner_version: env!("CARGO_PKG_VERSION").into(),
-            engine: "redflag-native-v1".into(),
+            engine: coverage.engine.name.clone(),
+            detector: coverage.engine.clone(),
             config_sha256,
             complete: true,
             findings_count: 0,
@@ -126,6 +129,7 @@ pub(crate) struct Verification {
     pub targets: Vec<ArtifactTarget>,
     pub config_sha256: String,
     pub engine: String,
+    pub detector: EngineInfo,
     pub private_env: Vec<String>,
 }
 
@@ -140,7 +144,10 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
     let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
     if manifest.schema_version != SCHEMA_VERSION
         || manifest.scanner_version != env!("CARGO_PKG_VERSION")
-        || manifest.engine != "redflag-native-v1"
+        || manifest.engine != manifest.detector.name
+        || !manifest.detector.supported()
+        || (manifest.detector.name == "redflag-native"
+            && manifest.detector.config_sha256 != manifest.config_sha256)
         || !manifest.complete
         || manifest.findings_count != 0
         || manifest.symlinks != "reject"
@@ -227,6 +234,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         targets: manifest.targets,
         config_sha256: manifest.config_sha256,
         engine: manifest.engine,
+        detector: manifest.detector,
         private_env: manifest.private_env,
     })
 }

@@ -1,5 +1,6 @@
 use crate::{
     config::ScanLimits,
+    engine::{EngineInfo, GeneralEngine},
     error::RedflagError,
     protected_values::ProtectedValues,
     scanner::{FindingHandler, Scanner},
@@ -38,6 +39,7 @@ pub(crate) struct ArtifactFile {
 
 #[derive(Serialize)]
 pub(crate) struct ArtifactCoverage {
+    pub engine: EngineInfo,
     pub targets: Vec<ArtifactTarget>,
     pub files: Vec<ArtifactFile>,
     pub total_bytes: u64,
@@ -142,9 +144,11 @@ impl ArtifactSet {
         self,
         scanner: &Scanner,
         protected: &ProtectedValues,
+        mut engine: GeneralEngine,
         handler: &mut H,
     ) -> Result<ArtifactCoverage, RedflagError> {
         let mut coverage = ArtifactCoverage {
+            engine: engine.info().clone(),
             targets: self.targets,
             files: Vec::new(),
             total_bytes: 0,
@@ -167,6 +171,7 @@ impl ArtifactSet {
                     )
                 })?;
             protected.scan(&path, &bytes, handler)?;
+            engine.add(&path, &bytes)?;
             for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
                 scanner.scan_artifact_line(
                     &path,
@@ -182,6 +187,7 @@ impl ArtifactSet {
                 sha256: digest(&bytes),
             });
         }
+        engine.finish(handler)?;
         // Detect inventory or content changes during inspection before declaring
         // completeness. Publication still needs its own verification afterwards.
         verify_inventory(&coverage.targets, &coverage.files, &coverage.limits)?;
