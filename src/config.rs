@@ -404,48 +404,51 @@ impl Config {
     }
 
     pub fn load(path: Option<PathBuf>) -> Result<Self, RedflagError> {
+        match path {
+            Some(path) => Self::from_toml(&fs::read_to_string(path)?),
+            None => Self::from_toml(""),
+        }
+    }
+
+    pub(crate) fn from_toml(content: &str) -> Result<Self, RedflagError> {
         let mut config = Config::default();
+        let user: PartialConfig = toml::from_str(content)?;
 
-        if let Some(config_path) = path {
-            let user: PartialConfig = toml::from_str(&fs::read_to_string(config_path)?)?;
-
-            for pattern in user.patterns {
-                if let Some(existing) = config
-                    .patterns
-                    .iter()
-                    .position(|current| current.name == pattern.name)
-                {
-                    config.patterns[existing] = pattern;
-                } else {
-                    config.patterns.push(pattern);
-                }
-            }
-            for extension in user.extensions {
-                if !config
-                    .extensions
-                    .iter()
-                    .any(|current| current.eq_ignore_ascii_case(&extension))
-                {
-                    config.extensions.push(extension);
-                }
-            }
-            for exclusion in user.exclusions {
-                // Keep the last occurrence at its original precedence. Removing
-                // a later duplicate can leave an intervening Ignore rule active.
-                config.exclusions.retain(|existing| existing != &exclusion);
-                config.exclusions.push(exclusion);
-            }
-            if let Some(entropy) = user.entropy {
-                config.entropy = entropy;
-            }
-            if let Some(git) = user.git {
-                config.git = git;
-            }
-            if let Some(limits) = user.limits {
-                config.limits = limits;
+        for pattern in user.patterns {
+            if let Some(existing) = config
+                .patterns
+                .iter()
+                .position(|current| current.name == pattern.name)
+            {
+                config.patterns[existing] = pattern;
+            } else {
+                config.patterns.push(pattern);
             }
         }
-
+        for extension in user.extensions {
+            if !config
+                .extensions
+                .iter()
+                .any(|current| current.eq_ignore_ascii_case(&extension))
+            {
+                config.extensions.push(extension);
+            }
+        }
+        for exclusion in user.exclusions {
+            // Keep the last occurrence at its original precedence. Removing
+            // a later duplicate can leave an intervening Ignore rule active.
+            config.exclusions.retain(|existing| existing != &exclusion);
+            config.exclusions.push(exclusion);
+        }
+        if let Some(entropy) = user.entropy {
+            config.entropy = entropy;
+        }
+        if let Some(git) = user.git {
+            config.git = git;
+        }
+        if let Some(limits) = user.limits {
+            config.limits = limits;
+        }
         config.validate()?;
         Ok(config)
     }

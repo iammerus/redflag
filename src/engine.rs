@@ -3,7 +3,7 @@ use crate::{
     artifacts::digest,
     config::Severity,
     error::RedflagError,
-    scanner::{Finding, FindingHandler},
+    scanner::{CommitMetadata, Finding, FindingHandler, FindingSpan},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -60,9 +60,17 @@ impl GeneralEngine {
         }
     }
     pub fn add(&mut self, path: &Path, bytes: &[u8]) -> Result<(), RedflagError> {
+        self.add_snapshot(path, bytes, None)
+    }
+    pub fn add_snapshot(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        commit: Option<CommitMetadata>,
+    ) -> Result<(), RedflagError> {
         match self {
             Self::Native(_) => Ok(()),
-            Self::Betterleaks(engine) => engine.add(path, bytes),
+            Self::Betterleaks(engine) => engine.add(path, bytes, commit),
         }
     }
     pub fn finish<H: FindingHandler>(self, handler: &mut H) -> Result<(), RedflagError> {
@@ -134,7 +142,7 @@ struct Pin {
 }
 
 struct Window {
-    original: PathBuf,
+    input: usize,
     line: usize,
     column: usize,
     len: usize,
@@ -144,12 +152,18 @@ struct Window {
     first_window: bool,
 }
 
+struct Input {
+    path: PathBuf,
+    commit: Option<CommitMetadata>,
+}
+
 /// Snapshot windows stay below the upstream reader's chunk size. Each byte is
 /// covered with 32 KiB of overlap; candidates reaching an inspection edge fail.
 pub(crate) struct Betterleaks {
     binary: PathBuf,
     workspace: TempDir,
     windows: Vec<Window>,
+    inputs: Vec<Input>,
     staged_bytes: u64,
     timeout: Duration,
     pub info: EngineInfo,
@@ -210,6 +224,7 @@ impl Betterleaks {
             binary,
             workspace,
             windows: Vec::new(),
+            inputs: Vec::new(),
             staged_bytes: 0,
             timeout: Duration::from_secs(timeout_seconds),
             info: EngineInfo {
@@ -224,7 +239,17 @@ impl Betterleaks {
         })
     }
 
-    pub fn add(&mut self, original: &Path, bytes: &[u8]) -> Result<(), RedflagError> {
+    fn add(
+        &mut self,
+        original: &Path,
+        bytes: &[u8],
+        commit: Option<CommitMetadata>,
+    ) -> Result<(), RedflagError> {
+        let input = self.inputs.len();
+        self.inputs.push(Input {
+            path: original.to_path_buf(),
+            commit,
+        });
         let mut line = 1usize;
         let mut column = 1usize;
         let mut previous = 0;
@@ -247,7 +272,7 @@ impl Betterleaks {
             let mut last_column = 1;
             advance(&mut last_line, &mut last_column, content);
             self.windows.push(Window {
-                original: original.to_path_buf(),
+                input,
                 line,
                 column,
                 len: content.len(),
@@ -264,6 +289,9 @@ impl Betterleaks {
     }
 
     pub fn finish<H: FindingHandler>(self, handler: &mut H) -> Result<(), RedflagError> {
+        if self.windows.is_empty() {
+            return Ok(());
+        }
         let root = self.workspace.path();
         let report_path = root.join("findings.jsonl");
         let log_path = root.join("engine.log");
@@ -364,23 +392,30 @@ impl Betterleaks {
             let found: EngineFinding =
                 serde_json::from_str(&record).map_err(|_| protocol_error())?;
             raw_count += 1;
-            if let Some(key) = self.locate(found)? {
+            for key in self.locate(found)? {
                 keys.insert(key);
             }
         }
         if (status.code() == Some(10)) != (raw_count > 0) {
             return Err(protocol_error());
         }
-        for (file, line, _column, _end_line, _end_column, rule) in keys {
-            handler.handle(Finding { file, line, pattern_name: format!("betterleaks:{rule}"),
-                description: "Credential candidate detected. Remove it from publication inputs; rotate it if it was exposed.".into(),
-                snippet: "[REDACTED]".into(), severity: Severity::High,
-                commit_hash: None, commit_author: None, commit_date: None })?;
+        for (input, primary, evidence, rule) in keys {
+            let input = &self.inputs[input];
+            let commit = input.commit.as_ref();
+            handler.handle(Finding {
+                file: input.path.clone(), line: primary.start_line,
+                pattern_name: format!("betterleaks:{rule}"),
+                description: "Credential candidate detected. Remove it from the inspected content; rotate it if it was exposed.".into(),
+                snippet: "[REDACTED]".into(), severity: Severity::High, evidence,
+                commit_hash: commit.map(|c| c.hash.clone()),
+                commit_author: commit.map(|c| c.author.clone()),
+                commit_date: commit.map(|c| c.date.clone()),
+            })?;
         }
         Ok(())
     }
 
-    fn locate(&self, found: EngineFinding) -> Result<Option<FindingKey>, RedflagError> {
+    fn locate(&self, found: EngineFinding) -> Result<Vec<FindingKey>, RedflagError> {
         let name = Path::new(&found.file)
             .file_name()
             .and_then(|s| s.to_str())
@@ -396,9 +431,70 @@ impl Betterleaks {
                 .rule_id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            || found.start_line < 2
+        {
+            return Err(protocol_error());
+        }
+        // Upstream caps combinations at 100 without signaling truncation. At
+        // that boundary, completeness cannot be established from its report.
+        if found.component_sets.len() >= 100 {
+            return Err(RedflagError::Incomplete(
+                "Betterleaks reached its multipart combination limit".into(),
+            ));
+        }
+        let sets = if found.component_sets.is_empty() {
+            vec![Vec::new()]
+        } else {
+            found.component_sets
+        };
+        let mut keys = Vec::new();
+        for mut set in sets {
+            set.insert(0, found.location.clone());
+            let mapped: Vec<_> = set
+                .iter()
+                .map(|span| self.locate_span(window, name, span))
+                .collect::<Result<_, _>>()?;
+            if mapped.iter().any(Option::is_none) {
+                // Re-evaluation in an adjacent window is safe only when ALL
+                // required pieces fit together inside the overlap.
+                let staged = fs::read(self.workspace.path().join("inputs").join(name))?;
+                let mut first = usize::MAX;
+                let mut last = 0;
+                for span in &set {
+                    first = first.min(offset(&staged, span.start_line, span.start_column - 1)?);
+                    last = last.max(offset(&staged, span.end_line, span.end_column)?);
+                }
+                if last.saturating_sub(first) >= STRIDE {
+                    return Err(RedflagError::Incomplete(
+                        "Multipart credential evidence exceeds the Betterleaks window overlap"
+                            .into(),
+                    ));
+                }
+            } else {
+                let mut evidence: Vec<_> = mapped.into_iter().flatten().collect();
+                let primary = evidence[0].clone();
+                evidence.sort();
+                evidence.dedup();
+                keys.push((
+                    window.input,
+                    primary.clone(),
+                    evidence,
+                    found.rule_id.clone(),
+                ));
+            }
+        }
+        Ok(keys)
+    }
+
+    fn locate_span(
+        &self,
+        window: &Window,
+        name: &str,
+        found: &FindingSpan,
+    ) -> Result<Option<FindingSpan>, RedflagError> {
+        if found.start_line < 2
             || found.start_column == 0
             || found.end_line < found.start_line
+            || (found.end_line == found.start_line && found.end_column < found.start_column)
             || found.end_line > window.last_line
             || found.start_column > window.len + 1
             || found.end_column > window.len + 1
@@ -449,28 +545,42 @@ impl Betterleaks {
             } else {
                 0
             };
-        Ok(Some((
-            window.original.clone(),
-            line,
-            column,
+        Ok(Some(FindingSpan {
+            start_line: line,
+            start_column: column,
             end_line,
             end_column,
-            found.rule_id,
-        )))
+        }))
     }
 }
 
-type FindingKey = (PathBuf, usize, usize, usize, usize, String);
+type FindingKey = (usize, FindingSpan, Vec<FindingSpan>, String);
+
+fn offset(bytes: &[u8], line: usize, column: usize) -> Result<usize, RedflagError> {
+    let start = if line == 1 {
+        0
+    } else {
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b == b'\n')
+            .nth(line - 2)
+            .map(|(i, _)| i + 1)
+            .ok_or_else(protocol_error)?
+    };
+    start
+        .checked_add(column)
+        .filter(|&v| v <= bytes.len())
+        .ok_or_else(protocol_error)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EngineFinding {
     rule_id: String,
     file: String,
-    start_line: usize,
-    end_line: usize,
-    start_column: usize,
-    end_column: usize,
+    location: FindingSpan,
+    component_sets: Vec<Vec<FindingSpan>>,
 }
 
 fn advance(line: &mut usize, column: &mut usize, bytes: &[u8]) {

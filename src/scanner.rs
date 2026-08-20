@@ -33,6 +33,18 @@ pub struct Finding {
     pub commit_author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_date: Option<String>,
+    /// Required match spans, in 1-based lines and inclusive byte columns.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<FindingSpan>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct FindingSpan {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub start_column: usize,
+    pub end_column: usize,
 }
 
 #[derive(Clone)]
@@ -433,7 +445,7 @@ impl Scanner {
         Ok(findings_count)
     }
 
-    fn check_line_limit(
+    pub(crate) fn check_line_limit(
         &self,
         path: &Path,
         number: usize,
@@ -488,7 +500,7 @@ impl Scanner {
             return Vec::new();
         }
 
-        self.detect_line(path, line_number, line, commit)
+        self.detect_line(path, line_number, line, commit, false)
     }
 
     /// Inspect published content without source exclusions or comment directives.
@@ -502,7 +514,7 @@ impl Scanner {
     ) -> Result<usize, RedflagError> {
         self.check_line_limit(path, line_number, bytes.len())?;
         let line = String::from_utf8_lossy(bytes);
-        let findings = self.detect_line(path, line_number, &line, None);
+        let findings = self.detect_line(path, line_number, &line, None, true);
         let count = findings.len();
         for mut finding in findings {
             // Nearby opaque private values must never appear as context.
@@ -518,6 +530,7 @@ impl Scanner {
         line_number: usize,
         line: &str,
         commit: Option<&CommitMetadata>,
+        include_evidence: bool,
     ) -> Vec<Finding> {
         let mut detections: Vec<Detection<'_>> = Vec::new();
         let mut builtin_indices: HashMap<(usize, usize), usize> = HashMap::new();
@@ -578,7 +591,20 @@ impl Scanner {
         detections
             .into_iter()
             .map(|detection| {
-                self.create_finding(path, line_number, line, detection, &redactions, commit)
+                let evidence = if include_evidence {
+                    vec![FindingSpan {
+                        start_line: line_number,
+                        end_line: line_number,
+                        start_column: detection.range.start + 1,
+                        end_column: detection.range.end,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let mut finding =
+                    self.create_finding(path, line_number, line, detection, &redactions, commit);
+                finding.evidence = evidence;
+                finding
             })
             .collect()
     }
@@ -597,6 +623,7 @@ impl Scanner {
             line,
             pattern_name: detection.name.to_string(),
             description: detection.description.to_string(),
+            evidence: Vec::new(),
             snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,
             commit_hash: commit.map(|metadata| metadata.hash.clone()),

@@ -22,6 +22,10 @@ Redistributions must include `LICENSE.betterleaks`.
 path prefilter: Redflag owns selection and completeness. `report.tmpl` emits only
 rule and location fields, so source snippets, secret captures and validation
 metadata cannot enter the normalized report.
+Required multipart component locations are retained as separate evidence sets.
+Input identity includes the snapshot, so overlap deduplication cannot collapse
+the same location in different commits. Reaching the upstream combination limit
+or an ambiguous multipart window boundary fails explicitly.
 
 Two narrow GitHub rule overrides preserve complete-token boundaries instead of
 accepting a fixed-length prefix of a longer identifier. Custom Redflag TOML rules
@@ -42,4 +46,4 @@ cargo test --locked --all-targets -- --include-ignored
 ```
 
 CI installs the pinned engine and includes these tests. Ordinary offline unit-test
-runs can omit the four explicitly marked external-engine tests.
+runs can omit the explicitly marked external-engine tests.

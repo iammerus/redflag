@@ -16,7 +16,7 @@ Install from source with a current Rust toolchain:
 cargo install --git https://github.com/iammerus/redflag
 ```
 
-Artifact scans also require the pinned Betterleaks engine. From a cloned checkout,
+Artifact and introduced-change scans also require the pinned Betterleaks engine. From a cloned checkout,
 run `python3 scripts/install_engine.py --directory <redflag-binary-directory>/engines`.
 See [engine installation and verification](engines/README.md). The legacy `scan`
 command needs no external engine; `artifacts --engine native` selects that detector
@@ -34,6 +34,9 @@ redflag scan .
 # Scan the current checkout and history reachable from HEAD
 redflag scan . --git-history
 
+# Inspect every introduced commit, including secrets deleted before HEAD
+redflag changes . --base origin/main --head HEAD
+
 # Create and use a configuration file
 redflag generate-config redflag.toml
 redflag show-config .
@@ -46,6 +49,8 @@ redflag verify-artifacts scan-manifest.json
 
 See [ARTIFACTS.md](ARTIFACTS.md) for strict target selection, private-value matching,
 manifests and checks before publication.
+See [CHANGES.md](CHANGES.md) for committed ranges, trusted base policy, merge
+handling, coverage and current limitations.
 
 ## GitHub Action
 

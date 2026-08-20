@@ -441,6 +441,7 @@ mod tests {
             commit_hash: None,
             commit_author: None,
             commit_date: None,
+            evidence: Vec::new(),
         }
     }
 

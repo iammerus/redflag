@@ -95,7 +95,7 @@ impl ProtectedValues {
                 pattern_name: format!("private-env:{}", self.names[found.pattern().as_usize()]),
                 description: "Declared private value is present in published bytes. Remove it from the build output and rotate it if it was published.".into(),
                 snippet: "[REDACTED]".into(), severity: Severity::Critical,
-                commit_hash: None, commit_author: None, commit_date: None,
+                commit_hash: None, commit_author: None, commit_date: None, evidence: Vec::new(),
             })?;
             count += 1;
         }

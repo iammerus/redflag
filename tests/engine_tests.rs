@@ -184,6 +184,24 @@ fn artificial_window_boundaries_cannot_create_provider_tokens() {
 
 #[test]
 #[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn multipart_evidence_that_cannot_fit_an_adjacent_window_fails_explicitly() {
+    let dir = tempdir().unwrap();
+    let key = ["AKIA", "Q7W2E5R3T6Y4U2I7"].concat();
+    let secret = ["mP9xR2vL7kN4qW6tY3cB8dF5", "hJ1sA0uE9gZ2iO4p"].concat();
+    let component = format!("aws_secret_access_key = {secret}");
+    let mut bytes = format!("{key} ").into_bytes();
+    bytes.resize(65536 - component.len(), b' ');
+    bytes.extend_from_slice(component.as_bytes());
+    bytes.extend_from_slice(b"\npublic data\n");
+    fs::write(dir.path().join("pair.txt"), bytes).unwrap();
+    let result = scan(dir.path(), &[]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("window overlap"));
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
 fn private_values_and_custom_rules_remain_redacted_and_manifests_record_engine() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("output.js");

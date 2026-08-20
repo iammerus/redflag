@@ -1,2 +1,2 @@
-{{range .}}{"rule_id":{{printf "%q" .RuleID}},"file":{{printf "%q" .File}},"start_line":{{.StartLine}},"end_line":{{.EndLine}},"start_column":{{.StartColumn}},"end_column":{{.EndColumn}}}
+{{define "span"}}{"start_line":{{.StartLine}},"end_line":{{.EndLine}},"start_column":{{.StartColumn}},"end_column":{{.EndColumn}}}{{end}}{{range .}}{"rule_id":{{printf "%q" .RuleID}},"file":{{printf "%q" .File}},"location":{{template "span" .}},"component_sets":[{{range $i, $set := .ComponentSets}}{{if $i}},{{end}}[{{$comma := false}}{{range $set.Components}}{{if not .Optional}}{{if $comma}},{{end}}{{template "span" .}}{{$comma = true}}{{end}}{{end}}]{{end}}]}
 {{end}}

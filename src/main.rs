@@ -1,4 +1,5 @@
 mod artifacts;
+mod changes;
 mod config;
 mod engine;
 mod error;
@@ -24,6 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect every introduced commit using policy from the trusted base
+    Changes(changes::ChangeArgs),
     /// Inspect every file selected for publication; exit 2 if inspection is incomplete
     Artifacts {
         #[arg(required = true, num_args = 1..)]
@@ -127,6 +130,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, RedflagError> {
     match cli.command {
+        Commands::Changes(args) => changes::run(args),
         Commands::Artifacts {
             paths,
             config,
