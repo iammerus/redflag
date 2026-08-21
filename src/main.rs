@@ -4,6 +4,7 @@ mod config;
 mod engine;
 mod error;
 mod git_scanner;
+mod github_event;
 mod manifest;
 mod output;
 mod protected_values;

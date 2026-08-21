@@ -37,6 +37,9 @@ redflag scan . --git-history
 # Inspect every introduced commit, including secrets deleted before HEAD
 redflag changes . --base origin/main --head HEAD
 
+# In GitHub Actions, use the exact event's PR, push or merge-queue scope
+redflag changes . --github-event "$GITHUB_EVENT_PATH"
+
 # Create and use a configuration file
 redflag generate-config redflag.toml
 redflag show-config .

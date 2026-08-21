@@ -78,6 +78,24 @@ impl Repo {
         )
         .unwrap();
     }
+
+    fn event(&self, name: &str, payload: Value, args: &[&str]) -> Output {
+        let path = self.dir.path().join("event.json");
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_redflag"))
+            .arg("changes")
+            .arg(self.dir.path())
+            .arg("--github-event")
+            .arg(path)
+            .args(["--engine", "native", "--format", "json"])
+            .args(args)
+            .env("GITHUB_EVENT_NAME", name)
+            .env("GITHUB_SHA", "not-the-event-head")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
+            .output()
+            .unwrap()
+    }
 }
 
 fn report(output: Output, code: i32) -> Value {
@@ -297,6 +315,82 @@ fn selected_symlinks_and_submodules_fail_explicitly() {
         let head = repo.commit_entries(&[base], &[("unsupported", id, mode)]);
         incomplete(repo.scan(Some(base), head, &[]));
     }
+}
+
+#[test]
+fn github_push_uses_exact_event_range_even_when_payload_commit_list_is_empty() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let add = repo.commit(&[base], &[("secret.txt", token().as_bytes())]);
+    let remove = repo.commit(&[add], &[]);
+    repo.git.set_head_detached(base).unwrap();
+    let payload = serde_json::json!({"ref": "refs/heads/feature", "before": base.to_string(), "after": remove.to_string(), "created": false, "deleted": false, "commits": []});
+    let result = report(repo.event("push", payload.clone(), &[]), 1);
+    assert_eq!(finding_commits(&result), BTreeSet::from([add.to_string()]));
+    assert_eq!(result["coverage"]["head"], remove.to_string());
+    assert_eq!(result["coverage"]["event"]["kind"], "push");
+    assert_eq!(
+        result["coverage"]["event"]["payload_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    incomplete(repo.event("push", payload, &["--base", &base.to_string()]));
+}
+
+#[test]
+fn github_new_branch_is_explicit_and_unsupported_pushes_do_not_report_clean() {
+    let repo = Repo::new();
+    let head = repo.commit(&[], &[("secret.txt", token().as_bytes())]);
+    let mut payload = serde_json::json!({"ref": "refs/heads/new", "before": "0".repeat(40), "after": head.to_string(), "created": true, "deleted": false});
+    let result = report(repo.event("push", payload.clone(), &[]), 1);
+    assert_eq!(result["coverage"]["new_branch"], true);
+    assert!(result["coverage"]["base"].is_null());
+    payload["ref"] = serde_json::json!("refs/tags/v1");
+    incomplete(repo.event("push", payload.clone(), &[]));
+    payload["ref"] = serde_json::json!("refs/heads/new");
+    payload["deleted"] = serde_json::json!(true);
+    incomplete(repo.event("push", payload, &[]));
+}
+
+#[test]
+fn github_fork_pull_request_inspects_branch_and_merge_without_tokens() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let add = repo.commit(&[base], &[("deleted.txt", token().as_bytes())]);
+    let head = repo.commit(&[add], &[]);
+    let merge = repo.commit(&[base, head], &[("merge-only.txt", token().as_bytes())]);
+    let payload = serde_json::json!({"number": 17, "action": "synchronize", "pull_request": {
+        "state": "open", "base": {"sha": base.to_string(), "repo": {"id": 100}},
+        "head": {"sha": head.to_string(), "repo": {"id": 200}}, "merge_commit_sha": merge.to_string()
+    }});
+    let result = report(repo.event("pull_request", payload.clone(), &[]), 1);
+    assert_eq!(
+        finding_commits(&result),
+        BTreeSet::from([add.to_string(), merge.to_string()])
+    );
+    assert_eq!(result["coverage"]["event"]["fork"], true);
+    assert_eq!(result["coverage"]["event"]["pull_request"], 17);
+    incomplete(repo.event("pull_request_target", payload.clone(), &[]));
+    repo.remove_object(merge);
+    incomplete(repo.event("pull_request", payload, &[]));
+}
+
+#[test]
+fn github_merge_queue_uses_group_base_and_head_and_includes_merge_resolution() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let branch = repo.commit(&[base], &[("public.txt", b"public")]);
+    let head = repo.commit(&[base, branch], &[("merge-only.txt", token().as_bytes())]);
+    let payload = serde_json::json!({"action": "checks_requested", "merge_group": {
+        "base_sha": base.to_string(), "head_sha": head.to_string()
+    }});
+    let result = report(repo.event("merge_group", payload, &[]), 1);
+    assert_eq!(finding_commits(&result), BTreeSet::from([head.to_string()]));
+    assert_eq!(result["coverage"]["base"], base.to_string());
+    assert_eq!(result["coverage"]["head"], head.to_string());
+    assert_eq!(result["coverage"]["event"]["kind"], "merge_group");
 }
 
 #[test]

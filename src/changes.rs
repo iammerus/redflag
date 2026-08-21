@@ -4,6 +4,7 @@ use crate::{
     config::{Config, ExclusionPolicy, ScanLimits},
     engine::{EngineChoice, EngineInfo, GeneralEngine},
     error::RedflagError,
+    github_event::{EventKind, EventScope},
     output::{OutputFormat, OutputHandler},
     scanner::{CommitMetadata, Finding, FindingHandler, FindingSpan, Scanner},
 };
@@ -22,18 +23,24 @@ pub(crate) struct ChangeArgs {
     /// Exclude commits already reachable from this trusted revision
     #[arg(
         long,
-        required_unless_present = "new_branch",
-        conflicts_with = "new_branch"
+        required_unless_present_any = ["new_branch", "github_event"],
+        conflicts_with_all = ["new_branch", "github_event"]
     )]
     base: Option<String>,
-    #[arg(long, default_value = "HEAD")]
+    #[arg(long, default_value = "HEAD", conflicts_with = "github_event")]
     head: String,
     /// Inspect all reachable commits when there is no previous branch tip
-    #[arg(long)]
+    #[arg(long, conflicts_with = "github_event")]
     new_branch: bool,
     /// Also inspect this synthetic merge; its parents must include base and head
-    #[arg(long, requires = "base")]
+    #[arg(long, requires = "base", conflicts_with = "github_event")]
     merge_result: Option<String>,
+    /// Read exact source scope from the GitHub Actions event JSON file
+    #[arg(long, value_name = "FILE")]
+    github_event: Option<PathBuf>,
+    /// Event type; defaults to GITHUB_EVENT_NAME when using --github-event
+    #[arg(long, value_enum, requires = "github_event")]
+    event_name: Option<EventKind>,
     /// Read root redflag.toml from this trusted revision instead of base
     #[arg(long, conflicts_with_all = ["config", "no_config"])]
     policy_ref: Option<String>,
@@ -61,6 +68,8 @@ struct Coverage {
     head: String,
     merge_result: Option<String>,
     new_branch: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<EventScope>,
     selection: &'static str,
     policy_origin: String,
     config_sha256: String,
@@ -103,7 +112,18 @@ struct SkippedRevision {
     reason: &'static str,
 }
 
-pub(crate) fn run(args: ChangeArgs) -> Result<u8, RedflagError> {
+pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
+    let event = args
+        .github_event
+        .as_ref()
+        .map(|path| EventScope::read(path, args.event_name))
+        .transpose()?;
+    if let Some(event) = &event {
+        args.base = event.base.clone();
+        args.head = event.head.clone();
+        args.merge_result = event.merge_result.clone();
+        args.new_branch = event.new_branch;
+    }
     let repo = Repository::open(&args.path)?;
     if repo.is_shallow() {
         return Err(RedflagError::Incomplete(
@@ -154,6 +174,7 @@ pub(crate) fn run(args: ChangeArgs) -> Result<u8, RedflagError> {
         head: head.to_string(),
         merge_result: merge_result.map(|v| v.to_string()),
         new_branch: args.new_branch,
+        event,
         selection: "reachable(head) minus reachable(base), plus optional merge result",
         policy_origin,
         config_sha256,
