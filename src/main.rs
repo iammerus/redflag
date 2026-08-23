@@ -9,6 +9,7 @@ mod manifest;
 mod output;
 mod protected_values;
 mod scanner;
+mod source_occurrences;
 mod suppression;
 
 use crate::{config::Config, error::RedflagError, output::OutputHandler, scanner::Scanner};

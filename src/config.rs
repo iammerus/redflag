@@ -27,6 +27,10 @@ pub struct ScanLimits {
     /// Maximum total bytes selected for an artifact scan.
     pub max_total_bytes: u64,
     pub engine_timeout_seconds: u64,
+    /// Source comparison budgets, including parent detector evidence.
+    pub max_findings: usize,
+    pub max_diff_bytes: usize,
+    pub diff_timeout_seconds: u64,
 }
 
 impl Default for ScanLimits {
@@ -37,6 +41,9 @@ impl Default for ScanLimits {
             max_files: 100_000,
             max_total_bytes: 1024 * 1024 * 1024,
             engine_timeout_seconds: 120,
+            max_findings: 100_000,
+            max_diff_bytes: 4 * 1024 * 1024,
+            diff_timeout_seconds: 10,
         }
     }
 }
@@ -454,6 +461,12 @@ impl Config {
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
+        if self.limits.max_findings == 0
+            || self.limits.max_diff_bytes == 0
+            || self.limits.diff_timeout_seconds == 0
+        {
+            return Err(RedflagError::Config("limits.max_findings, limits.max_diff_bytes and limits.diff_timeout_seconds must be positive".into()));
+        }
         if self.limits.engine_timeout_seconds == 0 {
             return Err(RedflagError::Config(
                 "limits.engine_timeout_seconds must be positive".into(),

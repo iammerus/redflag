@@ -200,6 +200,130 @@ fn unrelated_edits_do_not_report_old_debt_but_new_occurrences_do() {
         .all(|f| f["line"] == 3));
 }
 
+fn same_line_occurrences(args: &[&str]) {
+    let repo = Repo::new();
+    let old = format!("const items=[1,\"{}\",2];", token());
+    let base = repo.commit(&[], &[("bundle.js", old.as_bytes())]);
+    let edited = format!("const items=[3,\"{}\",4];", token());
+    let harmless = repo.commit(&[base], &[("bundle.js", edited.as_bytes())]);
+    let result = report(repo.scan(Some(base), harmless, args), 0);
+    assert_eq!(
+        result["coverage"]["occurrence_comparison"]["existing_parent_occurrences"],
+        1
+    );
+    let two = format!("const items=[3,\"{}\",\"{}\",4];", token(), token());
+    let copied = repo.commit(&[harmless], &[("bundle.js", two.as_bytes())]);
+    let result = report(repo.scan(Some(harmless), copied, args), 1);
+    assert_eq!(result["findings_count"], 1);
+    // The identical bytes already existed in a non-credential context, but that
+    // is not a parent detector finding and cannot authorize this new occurrence.
+    let hidden = format!("const items=[\"{}\",\"X{}\"]", token(), token());
+    let before = repo.commit(&[], &[("boundary.js", hidden.as_bytes())]);
+    let revealed = format!("const items=[\"{}\",\"{}\"]", token(), token());
+    let after = repo.commit(&[before], &[("boundary.js", revealed.as_bytes())]);
+    let result = report(repo.scan(Some(before), after, args), 1);
+    assert!(result["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["pattern_name"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("github")));
+    assert_eq!(result["findings_count"], 1);
+}
+
+#[test]
+fn native_same_line_edits_preserve_old_debt_without_hiding_a_new_occurrence() {
+    same_line_occurrences(&[]);
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn engine_same_line_edits_preserve_old_debt_without_hiding_a_new_occurrence() {
+    same_line_occurrences(&["--betterleaks-path", &engine_path()]);
+}
+
+#[test]
+fn comparison_budgets_fail_atomically_instead_of_guessing_occurrence_identity() {
+    let repo = Repo::new();
+    let old = format!("a \"{}\" b", token());
+    let base = repo.commit(&[], &[("bundle.js", old.as_bytes())]);
+    let edited = format!("c \"{}\" d", token());
+    let head = repo.commit(&[base], &[("bundle.js", edited.as_bytes())]);
+    let path = repo.dir.path().join("policy.toml");
+    for setting in [
+        "max_diff_bytes = 8",
+        "max_findings = 1",
+        "max_files = 1",
+        "max_diff_bytes = 0",
+        "diff_timeout_seconds = 0",
+        "max_findings = 0",
+    ] {
+        fs::write(&path, format!("[limits]\n{setting}\n")).unwrap();
+        incomplete(repo.scan(Some(base), head, &["--config", path.to_str().unwrap()]));
+    }
+    fs::write(
+        &path,
+        "[limits]\nmax_diff_bytes = 1000\nmax_findings = 2\nmax_files = 2\n",
+    )
+    .unwrap();
+    report(
+        repo.scan(Some(base), head, &["--config", path.to_str().unwrap()]),
+        0,
+    );
+}
+
+#[test]
+fn binary_projection_uses_original_byte_columns_for_parent_evidence() {
+    let repo = Repo::new();
+    let empty = repo.commit(&[], &[]);
+    for prefix in [
+        b"\xff ".as_slice(),
+        b"\xe2\x82 ",
+        b"\xffA\xf0\x90B ",
+        "🙂 \u{fffd}".as_bytes(),
+    ] {
+        let bytes = [prefix, token().as_bytes()].concat();
+        let head = repo.commit(&[empty], &[("binary.bin", &bytes)]);
+        let result = report(repo.scan(Some(empty), head, &[]), 1);
+        assert_eq!(
+            result["findings"][0]["evidence"][0]["start_column"],
+            prefix.len() + 1
+        );
+        assert_eq!(
+            result["findings"][0]["evidence"][0]["end_column"],
+            prefix.len() + token().len()
+        );
+    }
+    let bytes = [b"\xff ".as_slice(), token().as_bytes(), b" public"].concat();
+    let base = repo.commit(&[empty], &[("binary.bin", &bytes)]);
+    let result = report(repo.scan(Some(empty), base, &[]), 1);
+    assert_eq!(result["findings"][0]["evidence"][0]["start_column"], 3);
+    assert_eq!(
+        result["findings"][0]["evidence"][0]["end_column"],
+        2 + token().len()
+    );
+    let changed = [b"\xff\xfe ".as_slice(), token().as_bytes(), b" changed"].concat();
+    let head = repo.commit(&[base], &[("binary.bin", &changed)]);
+    report(repo.scan(Some(base), head, &[]), 0);
+}
+
+#[test]
+fn dense_parent_evidence_preserves_each_occurrence_on_a_minified_line() {
+    let repo = Repo::new();
+    let old = format!("{} public", format!("\"{}\",", token()).repeat(4096));
+    let base = repo.commit(&[], &[("bundle.js", old.as_bytes())]);
+    let new = format!("{} changed", format!("\"{}\",", token()).repeat(4096));
+    let head = repo.commit(&[base], &[("bundle.js", new.as_bytes())]);
+    let result = report(repo.scan(Some(base), head, &[]), 0);
+    assert_eq!(
+        result["coverage"]["occurrence_comparison"]["existing_parent_occurrences"],
+        4096
+    );
+}
+
 #[test]
 fn merge_imports_do_not_become_new_debt_but_merge_resolutions_are_inspected() {
     let repo = Repo::new();
@@ -460,4 +584,15 @@ fn multipart_credentials_use_added_component_evidence_in_commits_and_merges() {
         .iter()
         .any(|f| f["pattern_name"] == "betterleaks:aws-access-token"
             && f["commit_hash"] == merge.to_string()));
+    // Only context is deleted: the primary and component lines themselves are
+    // unchanged, but bringing them within the rule's range creates a credential.
+    let separated = format!("{key_line}{}{secret_line}", "public content\n".repeat(12));
+    let before = repo.commit(&[root], &[("pair.txt", separated.as_bytes())]);
+    let after = repo.commit(&[before], &[("pair.txt", both.as_bytes())]);
+    let result = report(repo.scan(Some(before), after, &args), 1);
+    assert!(result["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["pattern_name"] == "betterleaks:aws-access-token"));
 }

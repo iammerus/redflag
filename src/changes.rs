@@ -6,15 +6,13 @@ use crate::{
     error::RedflagError,
     github_event::{EventKind, EventScope},
     output::{OutputFormat, OutputHandler},
-    scanner::{CommitMetadata, Finding, FindingHandler, FindingSpan, Scanner},
+    scanner::{CommitMetadata, Scanner},
+    source_occurrences::{OccurrenceCoverage, SourceOccurrences},
 };
 use chrono::{DateTime, Utc};
 use git2::{Commit, DiffOptions, ObjectType, Oid, Patch, Repository, Sort, Tree};
 use serde::Serialize;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
 pub(crate) struct ChangeArgs {
@@ -81,6 +79,7 @@ struct Coverage {
     skipped: Vec<SkippedRevision>,
     inspected_bytes: u64,
     comparison_bytes: u64,
+    occurrence_comparison: Option<OccurrenceCoverage>,
     representations: &'static str,
 }
 
@@ -186,15 +185,16 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
         skipped: Vec::new(),
         inspected_bytes: 0,
         comparison_bytes: 0,
+        occurrence_comparison: None,
         representations:
-            "raw committed blobs; added-line evidence against every parent; no inline suppressions",
+            "raw committed blobs and parent detector evidence; one-to-one occurrence mapping; no inline suppressions",
     };
     let mut scanner = Scanner::with_config(config)?;
     if args.engine == EngineChoice::Betterleaks {
         scanner = scanner.for_external_engine();
     }
     let mut handler = OutputHandler::new(args.format, false);
-    let mut index = BTreeMap::new();
+    let mut occurrences = SourceOccurrences::new(&repo, scanner.limits())?;
     for oid in commits {
         inspect_commit(
             &repo,
@@ -202,16 +202,11 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
             &scanner,
             &mut engine,
             &mut coverage,
-            &mut index,
-            &mut handler,
+            &mut occurrences,
         )?;
     }
-    engine.finish(&mut IntroducedFindings {
-        files: &coverage.files,
-        index: &index,
-        handler: &mut handler,
-        commit: None,
-    })?;
+    engine.finish(&mut occurrences)?;
+    coverage.occurrence_comparison = Some(occurrences.emit_introduced(&mut handler)?);
     let exit = u8::from(handler.findings_count() > 0);
     handler.finish_report("changes", &coverage)?;
     Ok(exit)
@@ -326,17 +321,13 @@ fn range_limit(limit: usize) -> RedflagError {
     RedflagError::Incomplete(format!("Introduced range exceeds {limit} commits. Increase --max-commits to inspect the complete range."))
 }
 
-type FileIndex = BTreeMap<(String, PathBuf), usize>;
-
-#[allow(clippy::too_many_arguments)]
 fn inspect_commit(
     repo: &Repository,
     oid: Oid,
     scanner: &Scanner,
     engine: &mut GeneralEngine,
     coverage: &mut Coverage,
-    index: &mut FileIndex,
-    handler: &mut OutputHandler,
+    occurrences: &mut SourceOccurrences<'_>,
 ) -> Result<(), RedflagError> {
     let commit = repo.find_commit(oid)?;
     let tree = commit.tree()?;
@@ -344,7 +335,7 @@ fn inspect_commit(
         .map(|index| commit.parent(index)?.tree())
         .collect::<Result<_, _>>()?;
     let diff = repo.diff_tree_to_tree(parents.first(), Some(&tree), None)?;
-    let metadata = metadata(&commit);
+    let metadata = commit_metadata(&commit);
     for delta in diff.deltas() {
         let path = delta
             .new_file()
@@ -397,6 +388,7 @@ fn inspect_commit(
             scanner.limits(),
         )?;
         let mut added = Vec::new();
+        let mut comparison_parents = Vec::new();
         if entries.is_empty() {
             added.push(ParentChanges {
                 parent: None,
@@ -419,8 +411,11 @@ fn inspect_commit(
                 parent: Some(commit.parent_id(parent_index)?.to_string()),
                 lines: added_lines(bytes, blob.content(), path)?,
             });
+            comparison_parents.push((
+                commit_metadata(&commit.parent(parent_index)?),
+                previous.as_ref().map(|b| b.id()),
+            ));
         }
-        let file_index = coverage.files.len();
         coverage.files.push(FileRevision {
             commit: metadata.hash.clone(),
             path: path.to_path_buf(),
@@ -428,25 +423,14 @@ fn inspect_commit(
             size: blob.size(),
             added_against_parents: added,
         });
-        index.insert((metadata.hash.clone(), path.to_path_buf()), file_index);
-        engine.add_snapshot(path, blob.content(), Some(metadata.clone()))?;
-        let mut introduced = IntroducedFindings {
-            files: &coverage.files,
-            index,
-            handler,
-            commit: Some(&metadata),
-        };
-        for (line_index, bytes) in blob.content().split(|&b| b == b'\n').enumerate() {
-            // Validate every selected line even when it is unchanged context.
-            scanner.check_line_limit(path, line_index + 1, bytes.len())?;
-            if coverage.files[file_index]
-                .added_against_parents
-                .iter()
-                .any(|p| intersects(&p.lines, line_index + 1, line_index + 1))
-            {
-                scanner.scan_artifact_line(path, line_index + 1, bytes, &mut introduced)?;
-            }
-        }
+        occurrences.add_revision(
+            path,
+            metadata.clone(),
+            &blob,
+            &comparison_parents,
+            scanner,
+            engine,
+        )?;
     }
     Ok(())
 }
@@ -526,63 +510,12 @@ fn added_lines(old: &[u8], new: &[u8], path: &Path) -> Result<Vec<LineInterval>,
     Ok(lines)
 }
 
-fn metadata(commit: &Commit<'_>) -> CommitMetadata {
+fn commit_metadata(commit: &Commit<'_>) -> CommitMetadata {
     CommitMetadata {
         hash: commit.id().to_string(),
         author: commit.author().to_string(),
         date: DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0)
             .map(|d| d.to_rfc3339())
             .unwrap_or_else(|| commit.time().seconds().to_string()),
-    }
-}
-
-fn intersects(lines: &[LineInterval], start: usize, end: usize) -> bool {
-    let index = lines.partition_point(|r| r.end < start);
-    lines.get(index).is_some_and(|r| r.start <= end)
-}
-
-struct IntroducedFindings<'a, H> {
-    files: &'a [FileRevision],
-    index: &'a FileIndex,
-    handler: &'a mut H,
-    commit: Option<&'a CommitMetadata>,
-}
-
-impl<H: FindingHandler> FindingHandler for IntroducedFindings<'_, H> {
-    fn handle(&mut self, mut finding: Finding) -> Result<(), RedflagError> {
-        if let Some(commit) = self.commit {
-            finding.commit_hash = Some(commit.hash.clone());
-            finding.commit_author = Some(commit.author.clone());
-            finding.commit_date = Some(commit.date.clone());
-        }
-        let hash = finding
-            .commit_hash
-            .as_ref()
-            .ok_or_else(|| RedflagError::Incomplete("Git finding has no commit".into()))?;
-        let index = self
-            .index
-            .get(&(hash.clone(), finding.file.clone()))
-            .ok_or_else(|| {
-                RedflagError::Incomplete("Git finding has no inspected file revision".into())
-            })?;
-        if finding.evidence.is_empty() {
-            return Err(RedflagError::Incomplete(
-                "Git finding has no location evidence".into(),
-            ));
-        }
-        // A credential assembled by a merge is new only if some required evidence
-        // is added relative to EACH parent. Do not intersect the line sets first.
-        if self.files[*index]
-            .added_against_parents
-            .iter()
-            .all(|parent| {
-                finding.evidence.iter().any(|span: &FindingSpan| {
-                    intersects(&parent.lines, span.start_line, span.end_line)
-                })
-            })
-        {
-            self.handler.handle(finding)?;
-        }
-        Ok(())
     }
 }

@@ -55,11 +55,19 @@ configuration do not narrow this required range.
 
 The optional merge result must have the exact base and head among its parents.
 It is inspected in addition to the introduced branch commits. Each ordinary merge
-is compared with every parent. Required evidence must include an addition relative
-to every parent to count as a new finding in that merge. This prevents imported
-base debt from being reported again while retaining a multipart credential
-assembled from different parents. The detector records required component spans
+is compared with every parent. A finding counts as existing debt only when its
+entire required evidence maps to one detector finding in a parent at the same path.
+All required pieces must occur together in that parent; a credential assembled
+from different parents remains new. The detector records required component spans
 and keeps the same path/location in different commits distinct.
+
+Occurrence comparison maps unchanged byte spans one to one and checks actual
+parent detector evidence. An unrelated edit elsewhere on the same line therefore
+passes, while an extra copy of an existing value still fails. Removing punctuation
+or intervening context can create a credential even without adding its value;
+unchanged bytes alone never prove accepted debt. Newly added paths have no parent
+occurrences. Moving content that cannot be mapped in order is treated as a new
+occurrence; a value is never exempted globally because it appeared before.
 
 ## Trusted policy
 
@@ -89,14 +97,28 @@ source policy and JSON array format.
 Version 1 `changes` JSON contains completion status, findings and coverage: exact
 base/head/merge IDs, every introduced commit, policy origin and digest, engine
 provenance, inspected file revisions and blob IDs, added-line intervals for each
-parent, skipped paths/reasons and applied limits. Finding evidence uses 1-based
+parent, skipped paths/reasons and applied limits. Occurrence comparison records the
+snapshot/finding counts, occurrences proven to exist in parents and temporary
+report size. Finding evidence uses 1-based
 line numbers and inclusive byte columns; an end column of zero denotes the
 preceding newline. Reports never contain matched values or source snippets.
 
 Shallow repositories, missing required commits/trees/blobs and unresolved revisions
 fail. `--max-commits` defaults to `[git].max_depth` and limits the complete introduced
 range, including an extra merge result. Exact limits pass; exceeding one fails
-instead of truncating. `limits.max_files` counts considered file revisions, including
-skips. File/line size limits apply; `limits.max_total_bytes` bounds the sum of
-inspected new snapshots and parent bytes read for comparisons. Detector time and
-output limits also apply. Raise limits explicitly for larger reviewed scopes.
+instead of truncating. `limits.max_files` bounds both considered file revisions
+(including skips) and the unique source/parent snapshots inspected. File/line size
+limits also apply to parent snapshots. `limits.max_total_bytes` bounds inspected
+new bytes plus parent bytes read for comparisons. Identical commit/path snapshots
+are detected once. Detector time and output limits also apply.
+
+Source comparison retains at most `limits.max_findings` detector occurrences
+(default 100,000 including parents) and spools redacted records to a private
+anonymous temporary file capped at 64 MiB. Byte refinement uses pinned Similar
+3.2.0 with `limits.max_diff_bytes` (4 MiB combined old/new bytes after trimming equal
+prefix/suffix) and a `limits.diff_timeout_seconds` deadline (10 seconds). A mapping
+that cannot finish within these budgets fails operationally. Increase limits for
+larger reviewed scopes; no truncated or guessed mapping becomes a clean report.
+
+A complete report describes this inspection scope; it does not prove credentials
+are valid or absent under arbitrary transformations.

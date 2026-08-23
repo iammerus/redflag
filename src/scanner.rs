@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 
 pub(crate) use crate::suppression::SuppressionState;
 
-#[derive(Debug, serde::Serialize, Clone)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Finding {
     pub file: PathBuf,
     pub line: usize,
@@ -514,7 +514,10 @@ impl Scanner {
     ) -> Result<usize, RedflagError> {
         self.check_line_limit(path, line_number, bytes.len())?;
         let line = String::from_utf8_lossy(bytes);
-        let findings = self.detect_line(path, line_number, &line, None, true);
+        let mut findings = self.detect_line(path, line_number, &line, None, true);
+        if matches!(line, std::borrow::Cow::Owned(_)) && !findings.is_empty() {
+            restore_byte_columns(bytes, &mut findings);
+        }
         let count = findings.len();
         for mut finding in findings {
             // Nearby opaque private values must never appear as context.
@@ -630,6 +633,49 @@ impl Scanner {
             commit_author: commit.map(|metadata| metadata.author.clone()),
             commit_date: commit.map(|metadata| metadata.date.clone()),
         }
+    }
+}
+
+fn restore_byte_columns(bytes: &[u8], findings: &mut [Finding]) {
+    // Record only queried locations, not every invalid byte of a binary line.
+    let mut points = Vec::new();
+    for (finding, item) in findings.iter().enumerate() {
+        for (span, evidence) in item.evidence.iter().enumerate() {
+            points.push((evidence.start_column - 1, finding, span, false));
+            points.push((evidence.end_column, finding, span, true));
+        }
+    }
+    points.sort_unstable();
+    let mut points = points.into_iter().peekable();
+    let mut assign = |point: (usize, usize, usize, bool), offset: usize| {
+        let span = &mut findings[point.1].evidence[point.2];
+        if point.3 {
+            span.end_column = offset;
+        } else {
+            span.start_column = offset + 1;
+        }
+    };
+    let (mut raw, mut projected) = (0, 0);
+    while let Err(error) = std::str::from_utf8(&bytes[raw..]) {
+        raw += error.valid_up_to();
+        projected += error.valid_up_to();
+        while points.peek().is_some_and(|p| p.0 <= projected) {
+            let point = points.next().expect("peeked above");
+            assign(point, raw - (projected - point.0));
+        }
+        let length = error.error_len().unwrap_or(bytes.len() - raw);
+        while points.peek().is_some_and(|p| p.0 < projected + 3) {
+            let point = points.next().expect("peeked above");
+            assign(point, if point.3 { raw + length } else { raw });
+        }
+        raw += length;
+        projected += 3;
+        if points.peek().is_none() {
+            return;
+        }
+    }
+    for point in points {
+        assign(point, raw + point.0 - projected);
     }
 }
 
