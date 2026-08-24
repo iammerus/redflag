@@ -329,7 +329,9 @@ impl Betterleaks {
             "--ignore-gitleaks-allow",
             "--no-banner",
             "--no-color",
-            "--redact=100",
+            // The metadata-only template hashes captures in child memory. Raw
+            // captures and stderr never enter Redflag's public output.
+            "--redact=0",
             "--validation=false",
             "--max-archive-depth=0",
             "--max-decode-depth=0",
@@ -399,7 +401,7 @@ impl Betterleaks {
         if (status.code() == Some(10)) != (raw_count > 0) {
             return Err(protocol_error());
         }
-        for (input, primary, evidence, rule) in keys {
+        for (input, primary, evidence, rule, grouping_key) in keys {
             let input = &self.inputs[input];
             let commit = input.commit.as_ref();
             handler.handle(Finding {
@@ -407,6 +409,8 @@ impl Betterleaks {
                 pattern_name: format!("betterleaks:{rule}"),
                 description: "Credential candidate detected. Remove it from the inspected content; rotate it if it was exposed.".into(),
                 snippet: "[REDACTED]".into(), severity: Severity::High, evidence,
+                primary: Some(primary),
+                grouping_key: Some(grouping_key),
                 commit_hash: commit.map(|c| c.hash.clone()),
                 commit_author: commit.map(|c| c.author.clone()),
                 commit_date: commit.map(|c| c.date.clone()),
@@ -426,7 +430,8 @@ impl Betterleaks {
             .parse()
             .map_err(|_| protocol_error())?;
         let window = self.windows.get(index).ok_or_else(protocol_error)?;
-        if found.rule_id.is_empty()
+        if !valid_digest(&found.secret_digest)
+            || found.rule_id.is_empty()
             || !found
                 .rule_id
                 .bytes()
@@ -447,9 +452,23 @@ impl Betterleaks {
             found.component_sets
         };
         let mut keys = Vec::new();
-        for mut set in sets {
-            set.insert(0, found.location.clone());
-            let mapped: Vec<_> = set
+        for set in sets {
+            let mut digests = vec![("primary".to_string(), found.secret_digest.clone())];
+            let mut locations = vec![found.location.clone()];
+            for component in set {
+                if !valid_digest(&component.secret_digest) || component.rule_id.is_empty() {
+                    return Err(protocol_error());
+                }
+                digests.push((component.rule_id, component.secret_digest));
+                locations.push(component.location);
+            }
+            let grouping_key = if digests.len() == 1 {
+                found.secret_digest.clone()
+            } else {
+                digests.sort();
+                format!("multipart:{}", digest(&serde_json::to_vec(&digests)?))
+            };
+            let mapped: Vec<_> = locations
                 .iter()
                 .map(|span| self.locate_span(window, name, span))
                 .collect::<Result<_, _>>()?;
@@ -459,7 +478,7 @@ impl Betterleaks {
                 let staged = fs::read(self.workspace.path().join("inputs").join(name))?;
                 let mut first = usize::MAX;
                 let mut last = 0;
-                for span in &set {
+                for span in &locations {
                     first = first.min(offset(&staged, span.start_line, span.start_column - 1)?);
                     last = last.max(offset(&staged, span.end_line, span.end_column)?);
                 }
@@ -479,6 +498,7 @@ impl Betterleaks {
                     primary.clone(),
                     evidence,
                     found.rule_id.clone(),
+                    grouping_key,
                 ));
             }
         }
@@ -554,7 +574,11 @@ impl Betterleaks {
     }
 }
 
-type FindingKey = (usize, FindingSpan, Vec<FindingSpan>, String);
+type FindingKey = (usize, FindingSpan, Vec<FindingSpan>, String, String);
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 fn offset(bytes: &[u8], line: usize, column: usize) -> Result<usize, RedflagError> {
     let start = if line == 1 {
@@ -580,7 +604,16 @@ struct EngineFinding {
     rule_id: String,
     file: String,
     location: FindingSpan,
-    component_sets: Vec<Vec<FindingSpan>>,
+    secret_digest: String,
+    component_sets: Vec<Vec<EngineComponent>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EngineComponent {
+    rule_id: String,
+    location: FindingSpan,
+    secret_digest: String,
 }
 
 fn advance(line: &mut usize, column: &mut usize, bytes: &[u8]) {

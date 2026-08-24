@@ -11,8 +11,9 @@ arguments or give an untrusted PR access to build secrets for this check.
 
 Exit codes are **0** for complete inspection without findings, **1** for findings,
 and **2** for an operational failure or incomplete inspection. Check the exit code
-before uploading. An error leaves JSON stdout empty. Text output can show findings
-before a later failure, so text output alone is not a completion signal.
+before uploading. Inspection and report-preparation errors leave both text and
+JSON stdout empty; output I/O can still interrupt final delivery. Always check
+the exit code.
 
 Artifact scans use pinned Betterleaks 1.8.1 for general credentials, Redflag's
 native matcher for declared private values, and existing custom TOML rules plus
@@ -67,8 +68,11 @@ unexpected warning or error. Engine logs and secret captures are never forwarded
 Decoding and archive inspection remain separate modernization work; transformed
 or compressed inner content is not yet certified as inspected.
 
-Artifact JSON uses a version 1 envelope with mode, completion status, scanner
-version, findings count, coverage and findings. Coverage includes resolved targets,
+Artifact JSON uses a version 2 envelope with mode, completion status, scanner
+version, grouped logical findings, occurrence IDs, remediation, the original flat
+findings and separate observation/group/occurrence counts. See
+[REPORTING.md](REPORTING.md) for the schema and identity contract.
+Coverage includes resolved targets,
 every selected file's relative path, size and SHA-256, selected private variable
 names, resource limits, representations, engine version and executable/config
 digests. It contains no private values. The
@@ -78,8 +82,11 @@ Default limits in `[limits]` are 100,000 files, 64 MiB per file, 16 MiB per line
 and 1 GiB of total artifact bytes (`max_files`, `max_file_bytes`, `max_line_bytes`,
 `max_total_bytes`). Exceeding a limit is an error, never a silent skip. Override
 limits with `--config policy.toml` after reviewing the expected build size.
-Artifact inspection holds one bounded file in memory and spools JSON findings to
-a private temporary file. Engine snapshots require up to roughly twice the selected
+Artifact inspection holds one bounded file in memory and spools redacted findings
+to a private temporary file, retaining bounded location/ID indexes for grouping.
+Reports accept at most `limits.max_findings` observations (100,000 by default) and
+64 MiB of private input records; budget overruns fail before output.
+Engine snapshots require up to roughly twice the selected
 input bytes in temporary storage, plus per-file overhead. The engine has a default
 120-second subprocess timeout (`limits.engine_timeout_seconds`), a 64 MiB report
 limit and a 4 MiB log limit; exceeding any budget fails the scan. Its Go runtime

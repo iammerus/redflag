@@ -19,9 +19,13 @@ It does not extract arbitrary paths. Scanning never installs or updates engines.
 Redistributions must include `LICENSE.betterleaks`.
 
 `betterleaks.toml` inherits the pinned engine's rules while disabling its global
-path prefilter: Redflag owns selection and completeness. `report.tmpl` emits only
-rule and location fields, so source snippets, secret captures and validation
-metadata cannot enter the normalized report.
+path prefilter: Redflag owns selection and completeness. `report.tmpl` emits rule
+and location fields plus private SHA-256 digests of captured values. The child
+retains captures in memory (`--redact=0`) so the template hashes actual captures;
+hashing an already redacted placeholder would merge unrelated credentials.
+The template never emits raw captures, snippets or validation metadata. Private
+digests remain in temporary processing files and are removed from public reports.
+Public IDs derive from versioned locations and detector evidence; see REPORTING.md.
 Required multipart component locations are retained as separate evidence sets.
 Input identity includes the snapshot, so overlap deduplication cannot collapse
 the same location in different commits. Reaching the upstream combination limit

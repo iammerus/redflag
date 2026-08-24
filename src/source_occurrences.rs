@@ -53,6 +53,7 @@ struct Record {
     snapshot: usize,
     occurrence: Occurrence,
     finding: Finding,
+    grouping_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -206,7 +207,9 @@ impl<'repo> SourceOccurrences<'repo> {
             if existing {
                 coverage.existing_parent_occurrences += 1;
             } else {
-                handler.handle(record.finding)?;
+                let mut finding = record.finding;
+                finding.grouping_key = record.grouping_key;
+                handler.handle(finding)?;
             }
         }
         Ok(coverage)
@@ -259,10 +262,12 @@ impl FindingHandler for SourceOccurrences<'_> {
                 "Source and parent findings exceed limits.max_findings".into(),
             ));
         }
+        let grouping_key = finding.grouping_key.clone();
         let record = Record {
             snapshot,
             occurrence,
             finding,
+            grouping_key,
         };
         let bytes = serde_json::to_vec(&record)?;
         if bytes.len() + 1 > MAX_SPOOL_BYTES.saturating_sub(self.spool_bytes) {

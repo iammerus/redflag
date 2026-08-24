@@ -165,8 +165,25 @@ fn introduced_commits_retain_deleted_and_reintroduced_secrets() {
     );
     assert_eq!(result["coverage"]["base"], base.to_string());
     assert_eq!(result["coverage"]["skipped"][0]["reason"], "deleted");
+    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["logical_findings_count"], 1);
+    assert_eq!(result["occurrences_count"], 2);
+    let occurrences = result["logical_findings"][0]["occurrences"]
+        .as_array()
+        .unwrap();
+    assert_ne!(occurrences[0]["id"], occurrences[1]["id"]);
+    for occurrence in occurrences {
+        assert_eq!(
+            occurrence["location"]["version"],
+            occurrence["location"]["commit"]
+        );
+        assert_eq!(occurrence["location"]["path"], "secret.txt");
+        assert!(occurrence["location"].get("target").is_none());
+    }
     let deleted = report(repo.scan(Some(base), remove, &[]), 1);
     assert_eq!(finding_commits(&deleted), BTreeSet::from([add.to_string()]));
+    let original = &deleted["logical_findings"][0]["occurrences"][0]["id"];
+    assert!(occurrences.iter().any(|o| &o["id"] == original));
 }
 
 #[test]

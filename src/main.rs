@@ -8,6 +8,7 @@ mod github_event;
 mod manifest;
 mod output;
 mod protected_values;
+mod report;
 mod scanner;
 mod source_occurrences;
 mod suppression;
@@ -164,15 +165,16 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             let protected =
                 protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
             let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
-            let mut handler = OutputHandler::new(format, false);
+            let mut handler = report::ReportHandler::new(format, scanner.limits())?;
             let coverage = selected.scan(&scanner, &protected, engine, &mut handler)?;
             let exit = u8::from(handler.findings_count() > 0);
+            let context = report::ReportContext::artifacts(&coverage)?;
             if exit == 0 {
                 if let Some(manifest) = manifest_output {
                     manifest.write(&coverage, config_sha256)?;
                 }
             }
-            if let Err(error) = handler.finish_report("artifacts", &coverage) {
+            if let Err(error) = handler.finish_report(context, &coverage) {
                 if let Some(path) = manifest {
                     let _ = std::fs::remove_file(path);
                 }

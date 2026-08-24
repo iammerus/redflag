@@ -1,16 +1,20 @@
 use crate::{
     config::Severity,
     error::RedflagError,
-    scanner::{Finding, FindingHandler},
+    scanner::{Finding, FindingHandler, FindingSpan},
 };
 use aho_corasick::AhoCorasick;
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::Path,
+};
 
 /// Only explicitly declared environment variables enter this matcher.
 /// Its contents are intentionally neither Debug nor Serialize.
 pub(crate) struct ProtectedValues {
     names: Vec<String>,
     matcher: Option<AhoCorasick>,
+    max_value_len: usize,
 }
 
 impl ProtectedValues {
@@ -53,6 +57,11 @@ impl ProtectedValues {
     }
 
     fn from_values(values: Vec<(String, String)>) -> Result<Self, RedflagError> {
+        let max_value_len = values
+            .iter()
+            .map(|(_, value)| value.len())
+            .max()
+            .unwrap_or(0);
         let matcher = if values.is_empty() {
             None
         } else {
@@ -65,6 +74,7 @@ impl ProtectedValues {
         Ok(Self {
             names: values.into_iter().map(|(name, _)| name).collect(),
             matcher,
+            max_value_len,
         })
     }
 
@@ -84,18 +94,46 @@ impl ProtectedValues {
         let mut count = 0;
         let mut end = 0;
         let mut end_line = 1;
-        // Standard overlapping matches have nondecreasing end offsets. Count
-        // intervening newlines once; subtract newlines inside multiline values.
+        let mut line_start = 0;
+        let mut newlines = VecDeque::new();
+        let mut preceding = None;
+        // Keep only the newline window needed by the longest declared value.
+        // Match ends are monotonic; overlapping starts may move backwards.
         for found in matcher.find_overlapping_iter(bytes) {
-            end_line += newlines(&bytes[end..found.end()]);
+            let earliest = found.end().saturating_sub(self.max_value_len + 1);
+            while newlines
+                .front()
+                .is_some_and(|&(offset, _)| offset < earliest)
+            {
+                preceding = newlines.pop_front();
+            }
+            for (offset, &byte) in bytes[end..found.end()].iter().enumerate() {
+                if byte == b'\n' {
+                    end_line += 1;
+                    line_start = end + offset + 1;
+                    let newline = (line_start - 1, end_line);
+                    if newline.0 < earliest {
+                        preceding = Some(newline);
+                    } else {
+                        newlines.push_back(newline);
+                    }
+                }
+            }
             end = found.end();
-            let line = end_line - newlines(&bytes[found.start()..found.end()]);
+            let index = newlines.partition_point(|&(offset, _)| offset < found.start());
+            let previous = index.checked_sub(1).map(|i| newlines[i]).or(preceding);
+            let (line, column) = previous.map_or((1, found.start() + 1), |(offset, line)| {
+                (line, found.start() - offset)
+            });
             handler.handle(Finding {
                 file: path.to_path_buf(), line,
                 pattern_name: format!("private-env:{}", self.names[found.pattern().as_usize()]),
                 description: "Declared private value is present in published bytes. Remove it from the build output and rotate it if it was published.".into(),
                 snippet: "[REDACTED]".into(), severity: Severity::Critical,
-                commit_hash: None, commit_author: None, commit_date: None, evidence: Vec::new(),
+                commit_hash: None, commit_author: None, commit_date: None,
+                evidence: vec![FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }],
+                primary: Some(FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }),
+                grouping_key: Some(crate::artifacts::digest(&bytes[found.start()..found.end()])),
             })?;
             count += 1;
         }
@@ -109,8 +147,4 @@ fn valid_name(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-fn newlines(bytes: &[u8]) -> usize {
-    bytes.iter().filter(|&&byte| byte == b'\n').count()
 }

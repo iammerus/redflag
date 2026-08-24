@@ -275,3 +275,123 @@ fn private_values_and_custom_rules_remain_redacted_and_manifests_record_engine()
         .unwrap();
     report(output, 0);
 }
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn engine_groups_captured_values_with_native_and_private_evidence() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    let value = token();
+    fs::write(
+        dist.join("first"),
+        format!("const credential = '{value}';\n"),
+    )
+    .unwrap();
+    fs::write(dist.join("second"), format!("{value}\n")).unwrap();
+    let policy = dir.path().join("policy.toml");
+    fs::write(&policy, "[[patterns]]\nname = 'custom-provider'\npattern = 'ghp_[a-zA-Z0-9]{36}'\ndescription = 'Custom provider'\nseverity = 'High'\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(&dist)
+        .arg("--config")
+        .arg(&policy)
+        .args([
+            "--format",
+            "json",
+            "--private-env",
+            "RF_PROVIDER",
+            "--betterleaks-path",
+        ])
+        .arg(engine_path())
+        .env("RF_PROVIDER", &value)
+        .output()
+        .unwrap();
+    let serialized = String::from_utf8_lossy(&output.stdout);
+    use sha2::{Digest, Sha256};
+    assert!(!serialized.contains(&value));
+    assert!(!serialized.contains(&format!("{:x}", Sha256::digest(value.as_bytes()))));
+    let result = report(output, 1);
+    assert_eq!(result["logical_findings_count"], 1);
+    assert_eq!(result["occurrences_count"], 2);
+    assert_eq!(result["findings_count"], 6);
+    for occurrence in result["logical_findings"][0]["occurrences"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(occurrence["evidence"].as_array().unwrap().len(), 3);
+    }
+    // Assignment context is detector evidence, not credential identity.
+    fs::remove_file(dist.join("first")).unwrap();
+    fs::remove_file(dist.join("second")).unwrap();
+    let private = ["qL8m", "W3kN7pT9vR2x"].concat();
+    fs::write(dist.join("first.env"), format!("password={private}\n")).unwrap();
+    fs::write(
+        dist.join("second.env"),
+        format!("password = \"{private}\"\n"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(&dist)
+        .args([
+            "--no-config",
+            "--format",
+            "json",
+            "--private-env",
+            "RF_GENERIC",
+            "--betterleaks-path",
+        ])
+        .arg(engine_path())
+        .env("RF_GENERIC", &private)
+        .output()
+        .unwrap();
+    let result = report(output, 1);
+    assert_eq!(result["logical_findings_count"], 1);
+    assert_eq!(result["occurrences_count"], 2);
+    assert!(result["findings_count"].as_u64().unwrap() >= 4);
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn multipart_group_identity_includes_every_required_value() {
+    let dir = tempdir().unwrap();
+    let key = ["AKIA", "Q7W2E5R3T6Y4U2I7"].concat();
+    let secret = ["mP9xR2vL7kN4qW6tY3cB8dF5", "hJ1sA0uE9gZ2iO4p"].concat();
+    for (name, secret) in [
+        ("one", secret.clone()),
+        ("copy", secret.clone()),
+        ("different", secret.replace('m', "n")),
+    ] {
+        fs::write(
+            dir.path().join(name),
+            format!("aws_access_key_id = {key}\naws_secret_access_key = {secret}\n"),
+        )
+        .unwrap();
+    }
+    let result = report(scan(dir.path(), &[]), 1);
+    let groups: Vec<_> = result["logical_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["rules"].get("betterleaks:aws-access-token").is_some())
+        .collect();
+    assert_eq!(groups.len(), 2);
+    let mut counts: Vec<_> = groups
+        .iter()
+        .map(|g| g["occurrence_count"].as_u64().unwrap())
+        .collect();
+    counts.sort();
+    assert_eq!(counts, [1, 2]);
+    for group in groups {
+        for occurrence in group["occurrences"].as_array().unwrap() {
+            let evidence = occurrence["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["rule_id"] == "betterleaks:aws-access-token")
+                .unwrap();
+            assert_eq!(evidence["spans"].as_array().unwrap().len(), 2);
+        }
+    }
+}

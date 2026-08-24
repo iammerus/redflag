@@ -36,6 +36,11 @@ pub struct Finding {
     /// Required match spans, in 1-based lines and inclusive byte columns.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<FindingSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<FindingSpan>,
+    /// Private per-scan grouping material; never part of a public finding.
+    #[serde(skip)]
+    pub(crate) grouping_key: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -520,6 +525,11 @@ impl Scanner {
         }
         let count = findings.len();
         for mut finding in findings {
+            let span = &finding.evidence[0];
+            finding.primary = Some(span.clone());
+            finding.grouping_key = Some(crate::artifacts::digest(
+                &bytes[span.start_column - 1..span.end_column],
+            ));
             // Nearby opaque private values must never appear as context.
             finding.snippet = "[REDACTED]".into();
             handler.handle(finding)?;
@@ -627,6 +637,8 @@ impl Scanner {
             pattern_name: detection.name.to_string(),
             description: detection.description.to_string(),
             evidence: Vec::new(),
+            primary: None,
+            grouping_key: None,
             snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,
             commit_hash: commit.map(|metadata| metadata.hash.clone()),

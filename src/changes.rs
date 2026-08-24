@@ -5,7 +5,8 @@ use crate::{
     engine::{EngineChoice, EngineInfo, GeneralEngine},
     error::RedflagError,
     github_event::{EventKind, EventScope},
-    output::{OutputFormat, OutputHandler},
+    output::OutputFormat,
+    report::{ReportContext, ReportHandler},
     scanner::{CommitMetadata, Scanner},
     source_occurrences::{OccurrenceCoverage, SourceOccurrences},
 };
@@ -193,7 +194,7 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     if args.engine == EngineChoice::Betterleaks {
         scanner = scanner.for_external_engine();
     }
-    let mut handler = OutputHandler::new(args.format, false);
+    let mut handler = ReportHandler::new(args.format, scanner.limits())?;
     let mut occurrences = SourceOccurrences::new(&repo, scanner.limits())?;
     for oid in commits {
         inspect_commit(
@@ -208,7 +209,7 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     engine.finish(&mut occurrences)?;
     coverage.occurrence_comparison = Some(occurrences.emit_introduced(&mut handler)?);
     let exit = u8::from(handler.findings_count() > 0);
-    handler.finish_report("changes", &coverage)?;
+    handler.finish_report(ReportContext::source(), &coverage)?;
     Ok(exit)
 }
 

@@ -94,7 +94,10 @@ The default detector is pinned offline Betterleaks; install it as described in
 detector. Custom TOML patterns remain native. Legacy `scan` retains its original
 source policy and JSON array format.
 
-Version 1 `changes` JSON contains completion status, findings and coverage: exact
+Version 2 `changes` JSON contains completion status, grouped logical findings,
+occurrence identities, detector evidence, remediation and the original flat
+findings. See [REPORTING.md](REPORTING.md) for the identity and redaction contract.
+Coverage records exact
 base/head/merge IDs, every introduced commit, policy origin and digest, engine
 provenance, inspected file revisions and blob IDs, added-line intervals for each
 parent, skipped paths/reasons and applied limits. Occurrence comparison records the
