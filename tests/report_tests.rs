@@ -241,3 +241,153 @@ fn text_reports_escape_control_characters_in_paths() {
     assert!(text.contains("asset\\n::error::injected\\u{1b}[31m"));
     assert!(!text.contains(&token()));
 }
+
+fn github(path: &Path, summary: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(path)
+        .args(["--engine", "native", "--no-config", "--format", "github"])
+        .arg("--github-summary")
+        .arg(summary)
+        .args(args)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn github_reports_bound_display_append_summary_and_keep_secrets_private() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("dist.js");
+    fs::write(&file, format!("{}\n", token()).repeat(101)).unwrap();
+    let summary = dir.path().join("summary.md");
+    fs::write(&summary, "Earlier step content\n").unwrap();
+    let output = github(&file, &summary, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("::error "))
+            .count(),
+        10
+    );
+    assert!(!stdout.contains(",file=")); // Build outputs have no source annotation mapping.
+    assert!(stdout.contains("10 of 101"));
+    let summary = fs::read_to_string(&summary).unwrap();
+    assert!(summary.starts_with("Earlier step content\n"));
+    assert!(summary.contains("1 logical finding(s), 101 occurrence(s)"));
+    assert!(summary.contains("Showing 100 of 101 occurrences"));
+    assert!(summary.contains("Remove the credential from publication inputs"));
+    assert!(summary.len() < 1024 * 1024);
+    for text in [&summary, &stdout] {
+        assert!(!text.contains(&token()));
+        assert!(!text.contains(&format!("{:x}", Sha256::digest(token().as_bytes()))));
+        assert!(!text.contains("grouping_key"));
+    }
+}
+
+#[test]
+fn github_clean_results_use_runner_summary_environment_and_failures_leave_it_untouched() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("output");
+    fs::write(&file, "public content").unwrap();
+    let summary = dir.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(&file)
+        .args(["--engine", "native", "--no-config", "--format", "github"])
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("::notice "));
+    let before = fs::read(&summary).unwrap();
+    assert!(String::from_utf8_lossy(&before).contains("No findings in the selected scope"));
+    let failed = github(&dir.path().join("missing"), &summary, &[]);
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(failed.stdout.is_empty());
+    assert_eq!(fs::read(&summary).unwrap(), before);
+}
+
+#[test]
+fn github_summary_cannot_mutate_publication_inputs_or_manifests() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    fs::write(dist.join("index"), "public output").unwrap();
+    let inside = dist.join("summary.md");
+    let failed = github(&dist, &inside, &[]);
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(failed.stdout.is_empty());
+    assert!(!inside.exists());
+    let manifest = dir.path().join("manifest.json");
+    let failed = github(
+        &dist,
+        &manifest,
+        &["--manifest", manifest.to_str().unwrap()],
+    );
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(failed.stdout.is_empty());
+    assert!(!manifest.exists());
+    // A full runner summary must not erase existing content or certify publication.
+    let summary = dir.path().join("summary.md");
+    let existing = vec![b'x'; 1024 * 1024];
+    fs::write(&summary, &existing).unwrap();
+    let failed = github(&dist, &summary, &["--manifest", manifest.to_str().unwrap()]);
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(failed.stdout.is_empty());
+    assert_eq!(fs::read(&summary).unwrap(), existing);
+    assert!(!manifest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn github_summary_rejects_symlinks_hardlinks_and_special_files() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::write(&input, "public input").unwrap();
+    let summary = dir.path().join("summary");
+    symlink(&input, &summary).unwrap();
+    assert_eq!(github(&input, &summary, &[]).status.code(), Some(2));
+    fs::remove_file(&summary).unwrap();
+    fs::hard_link(&input, &summary).unwrap();
+    assert_eq!(github(&input, &summary, &[]).status.code(), Some(2));
+    fs::remove_file(&summary).unwrap();
+    let _listener = UnixListener::bind(&summary).unwrap();
+    assert_eq!(github(&input, &summary, &[]).status.code(), Some(2));
+    assert_eq!(fs::read_to_string(&input).unwrap(), "public input");
+}
+
+#[test]
+fn github_arguments_are_explicit_and_legacy_formats_stay_compatible() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::write(&input, "public input").unwrap();
+    for (format, summary) in [("github", false), ("json", true), ("text", true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
+        command
+            .arg("artifacts")
+            .arg(&input)
+            .args(["--engine", "native", "--no-config", "--format", format])
+            .env_remove("GITHUB_STEP_SUMMARY");
+        if summary {
+            command
+                .arg("--github-summary")
+                .arg(dir.path().join("summary.md"));
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("scan")
+        .arg(&input)
+        .args(["--format", "github"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}

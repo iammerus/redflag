@@ -81,5 +81,66 @@ No clean artifact manifest survives a failed requested rescan or report finaliza
 
 Legacy `scan --format json` continues to emit its original array. `verify-artifacts`
 and `show-config` retain their own version 1 envelopes; publication manifests retain
-their independent version 2 contract. GitHub annotations and job summaries remain
-separate implementation work.
+their independent version 2 contract.
+
+## GitHub annotations and job summaries
+
+```sh
+redflag changes . --github-event "$GITHUB_EVENT_PATH" --format github
+redflag artifacts dist --private-env INTERNAL_API_KEY --format github
+# Local rendering or an explicit summary destination:
+redflag changes . --base BASE_SHA --head HEAD_SHA \
+  --format github --github-summary summary.md
+```
+
+GitHub format writes workflow annotations to stdout and appends a Markdown summary
+to `GITHUB_STEP_SUMMARY`, or to the explicit `--github-summary FILE`. The destination
+is required. Other formats reject `--github-summary`. Existing summary content is
+preserved. Parent directories must already exist. This uses GitHub's documented
+[workflow commands and summary file](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands),
+with [toolkit-compatible command escaping](https://github.com/actions/toolkit/blob/main/packages/core/src/command.ts).
+No API calls, tokens or PR comments are involved. The scanner's ordinary exit codes
+remain authoritative; every reported occurrence blocks, regardless of severity.
+
+The summary includes completion status, observation/group/occurrence counts,
+selected source scope or artifact roots, detector information, occurrence IDs,
+locations, rules and remediation. It emits at most 10 occurrence annotations and
+shows at most 100 occurrence rows, also bounded to roughly 512 KiB of new content.
+Long display fields are shortened. Every omission is identified with the total
+occurrence count; inspection still includes the entire selected scope. Use
+`--format json` when a complete machine-readable report is needed. Existing step
+content plus the new summary must fit GitHub's 1 MiB limit; otherwise rendering
+fails with exit 2 before annotations are emitted.
+
+Source links use each occurrence's recorded commit with URL-encoded paths.
+`GITHUB_REPOSITORY` supplies `owner/repo`; `GITHUB_SERVER_URL` defaults to
+`https://github.com` and supports HTTPS enterprise hosts. Missing or invalid link
+metadata produces plain locations. File annotations additionally require:
+
+- `GITHUB_SHA` resolves to a locally available commit with the same blob at the
+  reported path as the occurrence's recorded commit.
+- The current regular file's bytes still match that blob, within the 64 MiB
+  annotation verification bound.
+- The repository root equals `GITHUB_WORKSPACE` (default: repository root), the
+  file remains inside it, and its path contains no control characters. Nested
+  checkouts retain general annotations because no repository-path mapping has
+  been established.
+
+These checks also allow an unchanged blob from an earlier introduced commit to
+be annotated at the checked revision. Deleted exposures, changed files, dirty
+checkouts and unavailable annotation context keep general annotations and their
+original commit locations. Artifact occurrences use general annotations: generated
+output has no established source-file mapping. File annotations specify lines;
+byte columns remain in JSON to avoid confusing editor character offsets.
+
+Summary text escapes Markdown/HTML metacharacters, workflow properties escape
+command delimiters, and terminal error messages escape control characters.
+No credential captures or private grouping digests enter annotations or summaries.
+Summary destinations must be regular files outside publication inputs and distinct
+from the requested manifest. Symlinks and special files are rejected; Unix also
+rejects shared hard links. Scan failures leave prior summary content unchanged.
+Summary/output errors fail the step and invalidate a requested clean manifest.
+
+The CLI formatter is covered by offline fixtures, including token-free source
+events and historical locations. Verified prebuilt Action packaging and hosted
+workflow acceptance remain separate modernization items.

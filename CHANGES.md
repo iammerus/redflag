@@ -19,6 +19,11 @@ Use exact event SHAs in CI, or read the event directly:
 redflag changes . --github-event "$GITHUB_EVENT_PATH" --format json
 ```
 
+Use `--format github` in Actions to emit annotations and append the job summary.
+Historical findings retain commit links; file annotations require matching bytes
+at the checked revision. See [REPORTING.md](REPORTING.md) for prerequisites and
+display limits. This formatter requires no GitHub token.
+
 The event type comes from `GITHUB_EVENT_NAME` or explicit `--event-name
 pull_request|push|merge_group`. Manual base/head/new-branch/merge options cannot
 be combined with an event. The event payload is bounded to 25 MiB, and its digest

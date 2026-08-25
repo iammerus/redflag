@@ -5,8 +5,7 @@ use crate::{
     engine::{EngineChoice, EngineInfo, GeneralEngine},
     error::RedflagError,
     github_event::{EventKind, EventScope},
-    output::OutputFormat,
-    report::{ReportContext, ReportHandler},
+    report::{ReportArgs, ReportContext, ReportCoverage, ReportHandler},
     scanner::{CommitMetadata, Scanner},
     source_occurrences::{OccurrenceCoverage, SourceOccurrences},
 };
@@ -52,8 +51,8 @@ pub(crate) struct ChangeArgs {
     /// Fail if the complete introduced range exceeds this commit count
     #[arg(long)]
     max_commits: Option<usize>,
-    #[arg(short, long, value_enum, default_value = "text")]
-    format: OutputFormat,
+    #[command(flatten)]
+    report: ReportArgs,
     #[arg(long, value_enum, default_value = "betterleaks")]
     engine: EngineChoice,
     #[arg(long)]
@@ -91,6 +90,33 @@ struct FileRevision {
     blob: String,
     size: usize,
     added_against_parents: Vec<ParentChanges>,
+}
+
+impl ReportCoverage for Coverage {
+    fn summary_facts(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "Base",
+                self.base
+                    .clone()
+                    .unwrap_or_else(|| "none; all reachable history".into()),
+            ),
+            ("Head", self.head.clone()),
+            (
+                "Merge result",
+                self.merge_result.clone().unwrap_or_else(|| "none".into()),
+            ),
+            ("Introduced commits", self.commits.len().to_string()),
+            ("Inspected revisions", self.files.len().to_string()),
+            ("Inspected bytes", self.inspected_bytes.to_string()),
+            ("Policy", self.policy_origin.clone()),
+            ("Policy SHA-256", self.config_sha256.clone()),
+            (
+                "Engine",
+                format!("{} {}", self.engine.name, self.engine.version),
+            ),
+        ]
+    }
 }
 
 #[derive(Serialize)]
@@ -194,7 +220,7 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     if args.engine == EngineChoice::Betterleaks {
         scanner = scanner.for_external_engine();
     }
-    let mut handler = ReportHandler::new(args.format, scanner.limits())?;
+    let mut handler = ReportHandler::new(args.report, scanner.limits())?;
     let mut occurrences = SourceOccurrences::new(&repo, scanner.limits())?;
     for oid in commits {
         inspect_commit(
@@ -209,7 +235,10 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     engine.finish(&mut occurrences)?;
     coverage.occurrence_comparison = Some(occurrences.emit_introduced(&mut handler)?);
     let exit = u8::from(handler.findings_count() > 0);
-    handler.finish_report(ReportContext::source(), &coverage)?;
+    handler.finish_report(
+        ReportContext::source(coverage.repository.clone()),
+        &coverage,
+    )?;
     Ok(exit)
 }
 

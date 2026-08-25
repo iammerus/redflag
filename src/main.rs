@@ -39,8 +39,8 @@ enum Commands {
         /// Use built-in defaults without discovering redflag.toml
         #[arg(long, conflicts_with = "config")]
         no_config: bool,
-        #[arg(short, long, value_enum, default_value = "text")]
-        format: output::OutputFormat,
+        #[command(flatten)]
+        report: report::ReportArgs,
         /// Match the exact value of this environment variable (repeat for each name)
         #[arg(long, value_name = "NAME")]
         private_env: Vec<String>,
@@ -125,7 +125,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("Error: {}", report::escape_terminal(&error.to_string()));
             ExitCode::from(2)
         }
     }
@@ -138,7 +138,7 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             paths,
             config,
             no_config,
-            format,
+            report,
             private_env,
             allow_short_private_value,
             manifest,
@@ -165,10 +165,11 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             let protected =
                 protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
             let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
-            let mut handler = report::ReportHandler::new(format, scanner.limits())?;
+            let mut handler = report::ReportHandler::new(report, scanner.limits())?;
             let coverage = selected.scan(&scanner, &protected, engine, &mut handler)?;
             let exit = u8::from(handler.findings_count() > 0);
-            let context = report::ReportContext::artifacts(&coverage)?;
+            let mut context = report::ReportContext::artifacts(&coverage)?;
+            context.protect_output(manifest.as_deref());
             if exit == 0 {
                 if let Some(manifest) = manifest_output {
                     manifest.write(&coverage, config_sha256)?;

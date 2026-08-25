@@ -55,6 +55,34 @@ pub(crate) struct ArtifactSet {
     pub(crate) files: Vec<(usize, PathBuf)>,
 }
 
+impl crate::report::ReportCoverage for ArtifactCoverage {
+    fn summary_facts(&self) -> Vec<(&'static str, String)> {
+        let mut facts = vec![
+            ("Targets", self.targets.len().to_string()),
+            ("Inspected files", self.files.len().to_string()),
+            ("Inspected bytes", self.total_bytes.to_string()),
+            ("Declared private variables", self.private_env.join(", ")),
+            (
+                "Engine",
+                format!("{} {}", self.engine.name, self.engine.version),
+            ),
+        ];
+        for (index, target) in self.targets.iter().take(10).enumerate() {
+            facts.push(("Target", format!("{index}: {}", target.root.display())));
+        }
+        if self.targets.len() > 10 {
+            facts.push((
+                "Additional targets",
+                format!(
+                    "{}; use --format json for every root",
+                    self.targets.len() - 10
+                ),
+            ));
+        }
+        facts
+    }
+}
+
 impl ArtifactSet {
     pub fn collect(paths: &[PathBuf], limits: &ScanLimits) -> Result<Self, RedflagError> {
         if paths.is_empty() {

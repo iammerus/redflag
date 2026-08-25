@@ -3,7 +3,6 @@ use crate::{
     artifacts::{digest, file_path, ArtifactCoverage},
     config::{ScanLimits, Severity},
     error::RedflagError,
-    output::OutputFormat,
     scanner::{Finding, FindingHandler, FindingSpan},
 };
 use serde::{Deserialize, Serialize};
@@ -15,9 +14,31 @@ use std::{
 };
 
 const MAX_REPORT_BYTES: usize = 64 * 1024 * 1024;
+mod github;
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReportFormat {
+    Text,
+    Json,
+    Github,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct ReportArgs {
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub format: ReportFormat,
+    /// Append a GitHub job summary here instead of GITHUB_STEP_SUMMARY
+    #[arg(long, value_name = "FILE")]
+    pub github_summary: Option<PathBuf>,
+}
+
+pub(crate) trait ReportCoverage: Serialize {
+    fn summary_facts(&self) -> Vec<(&'static str, String)>;
+}
 
 pub(crate) struct ReportHandler {
-    format: OutputFormat,
+    format: ReportFormat,
+    github_summary: Option<PathBuf>,
     spool: BufWriter<File>,
     count: usize,
     bytes: usize,
@@ -33,6 +54,8 @@ struct StoredFinding {
 pub(crate) struct ReportContext {
     mode: &'static str,
     artifacts: BTreeMap<PathBuf, ArtifactLocation>,
+    source_root: Option<PathBuf>,
+    protected_paths: Vec<PathBuf>,
 }
 
 struct ArtifactLocation {
@@ -42,10 +65,12 @@ struct ArtifactLocation {
 }
 
 impl ReportContext {
-    pub fn source() -> Self {
+    pub fn source(root: PathBuf) -> Self {
         Self {
             mode: "changes",
             artifacts: BTreeMap::new(),
+            source_root: Some(root),
+            protected_paths: Vec::new(),
         }
     }
     pub fn artifacts(coverage: &ArtifactCoverage) -> Result<Self, RedflagError> {
@@ -63,7 +88,15 @@ impl ReportContext {
         Ok(Self {
             mode: "artifacts",
             artifacts,
+            source_root: None,
+            protected_paths: coverage.targets.iter().map(|t| t.root.clone()).collect(),
         })
+    }
+
+    pub fn protect_output(&mut self, path: Option<&Path>) {
+        if let Some(path) = path {
+            self.protected_paths.push(path.to_path_buf());
+        }
     }
 
     fn location(&self, finding: &Finding) -> Result<Location, RedflagError> {
@@ -161,9 +194,29 @@ pub(crate) struct ReportOccurrence {
 }
 
 impl ReportHandler {
-    pub fn new(format: OutputFormat, limits: &ScanLimits) -> Result<Self, RedflagError> {
+    pub fn new(args: ReportArgs, limits: &ScanLimits) -> Result<Self, RedflagError> {
+        let github_summary = match args.format {
+            ReportFormat::Github => Some(
+                args.github_summary
+                    .or_else(|| std::env::var_os("GITHUB_STEP_SUMMARY").map(PathBuf::from))
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .ok_or_else(|| {
+                        RedflagError::Config(
+                            "GitHub format requires --github-summary FILE or GITHUB_STEP_SUMMARY"
+                                .into(),
+                        )
+                    })?,
+            ),
+            _ if args.github_summary.is_some() => {
+                return Err(RedflagError::Config(
+                    "--github-summary requires --format github".into(),
+                ))
+            }
+            _ => None,
+        };
         Ok(Self {
-            format,
+            format: args.format,
+            github_summary,
             spool: BufWriter::new(tempfile::tempfile()?),
             count: 0,
             bytes: 0,
@@ -178,17 +231,20 @@ impl ReportHandler {
     pub fn finish_report(
         mut self,
         context: ReportContext,
-        coverage: &impl Serialize,
+        coverage: &impl ReportCoverage,
     ) -> Result<(), RedflagError> {
         self.spool.flush()?;
         self.spool.get_mut().rewind()?;
         let file = self.spool.into_inner().map_err(|e| e.into_error())?;
         let mut reader = BufReader::new(file);
         let groups = prepare(&mut reader, &context)?;
+        if let Some(path) = self.github_summary {
+            return github::render(&groups, &context, &mut reader, coverage, &path, self.count);
+        }
         let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
         match self.format {
-            OutputFormat::Json => {
+            ReportFormat::Json => {
                 #[derive(Serialize)]
                 struct Header<'a, T> {
                     schema_version: u32,
@@ -254,7 +310,7 @@ impl ReportHandler {
                 }
                 writer.write_all(b"]}\n")?;
             }
-            OutputFormat::Text => {
+            ReportFormat::Text => {
                 for group in &groups {
                     let header = group.header(context.mode);
                     writeln!(
@@ -306,6 +362,7 @@ impl ReportHandler {
                     groups.iter().map(|g| g.occurrences.len()).sum::<usize>()
                 )?;
             }
+            ReportFormat::Github => unreachable!("GitHub summary is prepared in new"),
         }
         writer.flush()?;
         Ok(())
@@ -566,7 +623,7 @@ fn maximum_severity(a: Severity, b: Severity) -> Severity {
         b
     }
 }
-fn clean_text(value: &str) -> String {
+pub(crate) fn escape_terminal(value: &str) -> String {
     value
         .chars()
         .flat_map(|c| {
@@ -577,6 +634,9 @@ fn clean_text(value: &str) -> String {
             }
         })
         .collect()
+}
+fn clean_text(value: &str) -> String {
+    escape_terminal(value)
 }
 fn invalid(message: &str) -> RedflagError {
     RedflagError::Incomplete(message.into())

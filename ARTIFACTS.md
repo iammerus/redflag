@@ -78,6 +78,12 @@ names, resource limits, representations, engine version and executable/config
 digests. It contains no private values. The
 existing `scan --format json` array remains compatible.
 
+In GitHub Actions, `--format github` emits general error annotations and appends a
+bounded job summary with artifact locations, identities, coverage and remediation.
+Place `GITHUB_STEP_SUMMARY` (or `--github-summary FILE`) outside publication inputs
+and separate from the manifest. Generated artifacts are not mapped to source-file
+lines. See [REPORTING.md](REPORTING.md) for limits and the complete output contract.
+
 Default limits in `[limits]` are 100,000 files, 64 MiB per file, 16 MiB per line,
 and 1 GiB of total artifact bytes (`max_files`, `max_file_bytes`, `max_line_bytes`,
 `max_total_bytes`). Exceeding a limit is an error, never a silent skip. Override

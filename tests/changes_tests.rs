@@ -187,6 +187,128 @@ fn introduced_commits_retain_deleted_and_reintroduced_secrets() {
 }
 
 #[test]
+fn github_source_annotations_require_matching_checked_blobs_and_worktree_bytes() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let value = format!("// synthetic fixture\n{}\n", token());
+    let add = repo.commit(
+        &[base],
+        &[("kept.rs", value.as_bytes()), ("gone.rs", value.as_bytes())],
+    );
+    let head = repo.commit(&[add], &[("kept.rs", value.as_bytes())]);
+    repo.git.set_head_detached(head).unwrap();
+    repo.git
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    let output_dir = tempdir().unwrap();
+    let summary = output_dir.path().join("summary.md");
+    let run = |workspace: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_redflag"))
+            .arg("changes")
+            .arg(repo.dir.path())
+            .args([
+                "--engine",
+                "native",
+                "--format",
+                "github",
+                "--base",
+                &base.to_string(),
+                "--head",
+                &head.to_string(),
+            ])
+            .arg("--github-summary")
+            .arg(&summary)
+            .env("GITHUB_SHA", head.to_string())
+            .env("GITHUB_WORKSPACE", workspace)
+            .env("GITHUB_REPOSITORY", "fixture/project")
+            .env("GITHUB_SERVER_URL", "https://github.com")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
+            .output()
+            .unwrap()
+    };
+    let output = run(repo.dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.lines().filter(|s| s.starts_with("::error ")).count(),
+        2
+    );
+    assert_eq!(stdout.matches(",file=").count(), 1);
+    assert!(stdout.contains("file=kept.rs,line=2,endLine=2"));
+    assert!(!stdout.contains("file=gone.rs"));
+    let text = fs::read_to_string(&summary).unwrap();
+    assert!(text.contains(&format!(
+        "https://github.com/fixture/project/blob/{add}/gone.rs#L2"
+    )));
+    assert!(text.contains(&base.to_string()));
+    assert!(text.contains(&head.to_string()));
+    assert!(!text.contains(&token()));
+    let nested = run(repo.dir.path().parent().unwrap());
+    assert_eq!(nested.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&nested.stdout).contains(",file="));
+    fs::write(
+        repo.dir.path().join("kept.rs"),
+        format!("// moved\n{value}"),
+    )
+    .unwrap();
+    let output = run(repo.dir.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(",file="));
+}
+
+#[cfg(unix)]
+#[test]
+fn github_source_paths_cannot_inject_commands_or_markdown() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let unusual = "a,b:c%.rs";
+    let hostile = "line\n::error::forged[link](url).rs";
+    let head = repo.commit(
+        &[base],
+        &[(unusual, token().as_bytes()), (hostile, token().as_bytes())],
+    );
+    repo.git.set_head_detached(head).unwrap();
+    repo.git
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    let output_dir = tempdir().unwrap();
+    let summary = output_dir.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("changes")
+        .arg(repo.dir.path())
+        .args([
+            "--engine",
+            "native",
+            "--format",
+            "github",
+            "--base",
+            &base.to_string(),
+            "--head",
+            &head.to_string(),
+        ])
+        .arg("--github-summary")
+        .arg(&summary)
+        .env("GITHUB_SHA", head.to_string())
+        .env("GITHUB_WORKSPACE", repo.dir.path())
+        .env("GITHUB_REPOSITORY", "fixture/project")
+        .env("GITHUB_SERVER_URL", "https://github.com")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.lines().filter(|s| s.starts_with("::error ")).count(),
+        2
+    );
+    assert!(!stdout.contains("\n::error::forged"));
+    assert!(stdout.contains("file=a%2Cb%3Ac%25.rs,line=1"));
+    let text = fs::read_to_string(&summary).unwrap();
+    assert!(text.contains("/line%0A%3A%3Aerror%3A%3Aforged%5Blink%5D%28url%29.rs#L1"));
+    assert!(!text.contains("[link](url)"));
+}
+
+#[test]
 fn unrelated_edits_do_not_report_old_debt_but_new_occurrences_do() {
     let repo = Repo::new();
     let old = format!("{}\n", token());
