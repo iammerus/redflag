@@ -38,7 +38,7 @@ def main():
                 elapsed.append(time.perf_counter() - start)
                 assert result.returncode == 1, result.stderr.decode(errors="replace")
                 report = json.loads(result.stdout)
-                assert report["schema_version"] == 2
+                assert report["schema_version"] == 3
                 assert report["findings_count"] == count
                 assert report["occurrences_count"] == count
                 assert report["logical_findings_count"] == (count if unique else 1)

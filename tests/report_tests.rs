@@ -33,7 +33,7 @@ fn report(output: &Output) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["schema_version"], 3);
     assert_eq!(result["identity_schema"], "redflag-occurrence-v1");
     result
 }

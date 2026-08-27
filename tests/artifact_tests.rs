@@ -63,7 +63,7 @@ fn artifacts_inspect_hidden_html_unknown_and_source_ignored_paths() {
         .unwrap();
     }
     let result = report(&scan(dir.path(), &[], &[]), 1);
-    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["schema_version"], 3);
     assert_eq!(result["mode"], "artifacts");
     assert_eq!(result["complete"], true);
     assert_eq!(result["coverage"]["files"].as_array().unwrap().len(), 4);

@@ -4,6 +4,7 @@ use crate::{
     config::{Config, ExclusionPolicy, ScanLimits},
     engine::{EngineChoice, EngineInfo, GeneralEngine},
     error::RedflagError,
+    exceptions::{ExceptionArgs, Policy as ExceptionPolicy},
     github_event::{EventKind, EventScope},
     report::{ReportArgs, ReportContext, ReportCoverage, ReportHandler},
     scanner::{CommitMetadata, Scanner},
@@ -53,6 +54,8 @@ pub(crate) struct ChangeArgs {
     max_commits: Option<usize>,
     #[command(flatten)]
     report: ReportArgs,
+    #[command(flatten)]
+    exceptions: ExceptionArgs,
     #[arg(long, value_enum, default_value = "betterleaks")]
     engine: EngineChoice,
     #[arg(long)]
@@ -180,6 +183,14 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
         }
     }
     let (config, policy_origin) = trusted_policy(&repo, &args, base)?;
+    let exception_revision = args
+        .policy_ref
+        .as_deref()
+        .map(|revision| resolve(&repo, revision))
+        .transpose()?
+        .or(base);
+    let exception_policy =
+        ExceptionPolicy::load_source(&repo, exception_revision, &args.exceptions)?;
     let max_commits = args.max_commits.unwrap_or(config.git.max_depth);
     if max_commits == 0 {
         return Err(RedflagError::Config(
@@ -234,12 +245,11 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     }
     engine.finish(&mut occurrences)?;
     coverage.occurrence_comparison = Some(occurrences.emit_introduced(&mut handler)?);
-    let exit = u8::from(handler.findings_count() > 0);
     handler.finish_report(
         ReportContext::source(coverage.repository.clone()),
         &coverage,
-    )?;
-    Ok(exit)
+        exception_policy,
+    )
 }
 
 fn resolve(repo: &Repository, revision: &str) -> Result<Oid, RedflagError> {

@@ -3,6 +3,7 @@ mod changes;
 mod config;
 mod engine;
 mod error;
+mod exceptions;
 mod git_scanner;
 mod github_event;
 mod manifest;
@@ -175,7 +176,14 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
                     manifest.write(&coverage, config_sha256)?;
                 }
             }
-            if let Err(error) = handler.finish_report(context, &coverage) {
+            if let Err(error) = handler.finish_report(
+                context,
+                &coverage,
+                exceptions::Policy::disabled(
+                    "artifacts",
+                    "source exceptions do not apply to publication inputs",
+                ),
+            ) {
                 if let Some(path) = manifest {
                     let _ = std::fs::remove_file(path);
                 }

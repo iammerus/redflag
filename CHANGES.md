@@ -3,7 +3,7 @@
 `changes` inspects committed additions in every commit reachable from head but
 not from base. A secret introduced and deleted within the range still fails.
 The working tree is not an input. All findings are redacted. Exit codes are
-0 for complete and clean, 1 for findings, and 2 for an incomplete scan or invalid
+0 for complete with no blocking occurrences, 1 for blockers, and 2 for an incomplete scan or invalid
 configuration; failed JSON scans leave stdout empty.
 
 ```sh
@@ -99,9 +99,12 @@ The default detector is pinned offline Betterleaks; install it as described in
 detector. Custom TOML patterns remain native. Legacy `scan` retains its original
 source policy and JSON array format.
 
-Version 2 `changes` JSON contains completion status, grouped logical findings,
+Version 3 `changes` JSON contains completion status, grouped logical findings,
 occurrence identities, detector evidence, remediation and the original flat
 findings. See [REPORTING.md](REPORTING.md) for the identity and redaction contract.
+Reviewed source exceptions preserve evidence while separating accepted occurrences
+from blockers. Root `redflag-exceptions.json` comes from the trusted policy revision;
+the proposed head cannot approve itself. See [EXCEPTIONS.md](EXCEPTIONS.md).
 Coverage records exact
 base/head/merge IDs, every introduced commit, policy origin and digest, engine
 provenance, inspected file revisions and blob IDs, added-line intervals for each

@@ -1,7 +1,7 @@
 //! GitHub workflow commands and bounded job summaries; no API calls or tokens.
 use super::{
-    clean_text, invalid, read_occurrence, PhysicalOccurrence, PreparedGroup, ReportContext,
-    ReportCoverage,
+    clean_text, invalid, read_occurrence, ExceptionAudit, PhysicalOccurrence, PreparedGroup,
+    ReportContext, ReportCoverage,
 };
 use crate::error::RedflagError;
 use std::{
@@ -21,8 +21,10 @@ pub(super) fn render(
     coverage: &impl ReportCoverage,
     summary_path: &Path,
     observations: usize,
+    exceptions: &ExceptionAudit,
 ) -> Result<(), RedflagError> {
     let total: usize = groups.iter().map(|g| g.occurrences.len()).sum();
+    let blocking = total - exceptions.accepted_occurrences;
     let scope = LinkScope::from_environment();
     let mut summary = format!(
         "\n## Redflag {} inspection\n\n**Complete — {} logical finding(s), {total} occurrence(s), {observations} detector observation(s).**\n\n",
@@ -31,91 +33,131 @@ pub(super) fn render(
     if total == 0 {
         summary.push_str("No findings in the selected scope. Require this step to succeed before publication.\n\n");
     }
+    summary.push_str(&format!(
+        "**Blocking occurrences: {blocking}. Accepted by reviewed exception: {}.**\n\n",
+        exceptions.accepted_occurrences
+    ));
     summary.push_str("| Coverage | Value |\n| --- | --- |\n");
     for (name, value) in coverage.summary_facts() {
         summary.push_str(&format!("| {name} | {} |\n", code(&short(&value, 512))));
     }
+    summary.push_str(&format!(
+        "| Exception policy | {} |\n| Exception review | {} |\n",
+        code(&short(&exceptions.origin, 512)),
+        code(&format!(
+            "{} matched; {} unmatched; {} expired entries; evaluated {}",
+            exceptions.matched_entries,
+            exceptions.unmatched_entries,
+            exceptions.expired_entries,
+            exceptions.evaluated_at
+        ))
+    ));
     summary.push_str("\nLocations refer to inspected versions. Source links retain the reported commit; file annotations require matching bytes at the GitHub checked revision. Artifact targets are indexed in selection order. Columns in the JSON report are byte offsets.\n\n");
     let mut annotations = String::new();
     let mut rows = 0;
+    let mut emitted = 0;
     if total > 0 {
-        summary.push_str("| Finding | Location | Rules | Occurrence | Remediation |\n| --- | --- | --- | --- | --- |\n");
+        summary.push_str("| Finding | Location | Rules | Occurrence | Review | Remediation |\n| --- | --- | --- | --- | --- | --- |\n");
     }
-    'groups: for group in groups {
-        for occurrence in &group.occurrences {
-            if rows == MAX_ROWS {
-                break;
-            }
-            let evidence = read_occurrence(reader, occurrence)?;
-            let rules = short(
-                &evidence
-                    .evidence
-                    .iter()
-                    .map(|e| e.rule_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                512,
-            );
-            let header = group.header(context.mode);
-            let label = location_label(occurrence);
-            let location = match scope
+    let occurrences = || {
+        groups.iter().flat_map(|group| {
+            group
+                .occurrences
+                .iter()
+                .map(move |occurrence| (group, occurrence))
+        })
+    };
+    for (group, occurrence) in occurrences()
+        .filter(|(_, o)| !o.accepted())
+        .chain(occurrences().filter(|(_, o)| o.accepted()))
+        .take(MAX_ROWS)
+    {
+        let evidence = read_occurrence(reader, occurrence)?;
+        let rules = short(
+            &evidence
+                .evidence
+                .iter()
+                .map(|e| e.rule_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            512,
+        );
+        let header = group.header(context.mode);
+        let label = location_label(occurrence);
+        let location = match scope
+            .as_ref()
+            .and_then(|scope| scope.location_url(occurrence))
+        {
+            Some(url) => format!("[{}]({url})", code(&short(&label, 512))),
+            None => code(&short(&label, 512)),
+        };
+        let row = format!(
+            "| {} ({:?}, {})<br>{} | {location} | {} | {} | {} | {} |\n",
+            header.title,
+            header.severity,
+            occurrence.status(),
+            code(header.id),
+            code(&rules),
+            code(&occurrence.id),
+            occurrence
+                .review
                 .as_ref()
-                .and_then(|scope| scope.location_url(occurrence))
-            {
-                Some(url) => format!("[{}]({url})", code(&short(&label, 512))),
-                None => code(&short(&label, 512)),
-            };
-            let row = format!(
-                "| {} ({:?})<br>{} | {location} | {} | {} | {} |\n",
-                header.title,
-                header.severity,
-                code(header.id),
-                code(&rules),
-                code(&occurrence.id),
-                header.remediation
-            );
-            if summary.len() + row.len() > MAX_SUMMARY / 2 {
-                break 'groups;
-            }
-            summary.push_str(&row);
-            if rows < MAX_ANNOTATIONS {
-                let mut properties =
-                    format!("title={}", property(&format!("Redflag: {}", header.title)));
-                if let Some(path) = annotation_path(context, occurrence) {
-                    let end = occurrence
-                        .primary
-                        .end_line
-                        .saturating_sub(usize::from(occurrence.primary.end_column == 0))
-                        .max(occurrence.primary.start_line);
-                    properties.push_str(&format!(
-                        ",file={},line={},endLine={}",
-                        property(&path),
-                        occurrence.primary.start_line,
-                        end
-                    ));
-                }
-                let message = format!(
-                    "{}; {}. Rules: {rules}. {}",
-                    short(&label, 512),
-                    occurrence.id,
-                    header.remediation
-                );
-                annotations.push_str(&format!("::error {properties}::{}\n", data(&message)));
-            }
-            rows += 1;
-        }
-        if rows == MAX_ROWS {
+                .map(|r| code(&short(
+                    &format!(
+                        "{}; reviewed by {}; expires {}{}",
+                        r.reason,
+                        r.reviewed_by,
+                        r.expires_at,
+                        if occurrence.accepted() {
+                            ""
+                        } else {
+                            "; EXPIRED"
+                        }
+                    ),
+                    768
+                )))
+                .unwrap_or_else(|| "No exception".into()),
+            header.remediation
+        );
+        if summary.len() + row.len() > MAX_SUMMARY / 2 {
             break;
         }
+        summary.push_str(&row);
+        if !occurrence.accepted() && emitted < MAX_ANNOTATIONS {
+            let mut properties =
+                format!("title={}", property(&format!("Redflag: {}", header.title)));
+            if let Some(path) = annotation_path(context, occurrence) {
+                let end = occurrence
+                    .primary
+                    .end_line
+                    .saturating_sub(usize::from(occurrence.primary.end_column == 0))
+                    .max(occurrence.primary.start_line);
+                properties.push_str(&format!(
+                    ",file={},line={},endLine={}",
+                    property(&path),
+                    occurrence.primary.start_line,
+                    end
+                ));
+            }
+            let message = format!(
+                "{}; {}. Rules: {rules}. {}",
+                short(&label, 512),
+                occurrence.id,
+                header.remediation
+            );
+            annotations.push_str(&format!("::error {properties}::{}\n", data(&message)));
+            emitted += 1;
+        }
+        rows += 1;
     }
     if rows < total {
         summary.push_str(&format!("\nShowing {rows} of {total} occurrences. Inspection included every occurrence; use `--format json` for the complete report.\n"));
     }
-    summary.push_str(&format!("\nEmitted {} of {total} occurrence annotations (display limit {MAX_ANNOTATIONS}). Exit codes: 0 clean, 1 findings, 2 incomplete/error.\n", rows.min(MAX_ANNOTATIONS)));
-    if total == 0 {
-        annotations.push_str(&format!("::notice title=Redflag inspection complete::{} inspection complete; no findings in the selected scope.\n", context.mode));
-    } else if total > MAX_ANNOTATIONS {
-        annotations.push_str(&format!("Redflag: showing {MAX_ANNOTATIONS} of {total} occurrence annotations; see the job summary or use --format json for all findings.\n"));
+    summary.push_str(&format!("\nEmitted {emitted} of {blocking} blocking occurrence annotations (display limit {MAX_ANNOTATIONS}). Exit codes: 0 no blockers, 1 blocking occurrences, 2 incomplete/error.\n"));
+    if blocking == 0 {
+        annotations.push_str(&format!("::notice title=Redflag inspection complete::{} inspection complete; no blocking occurrences; {} occurrences accepted by reviewed exceptions.\n", context.mode, exceptions.accepted_occurrences));
+    } else if blocking > MAX_ANNOTATIONS {
+        annotations.push_str(&format!("Redflag: showing {MAX_ANNOTATIONS} of {blocking} occurrence annotations; see the job summary or use --format json for all findings.\n"));
     }
     append_summary(summary_path, &summary, context)?;
     let mut stdout = io::stdout().lock();

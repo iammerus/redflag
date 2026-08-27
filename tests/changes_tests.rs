@@ -147,6 +147,273 @@ fn engine_path() -> String {
     })
 }
 
+fn reviewed_policy(result: &Value) -> Value {
+    let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+    let entries: Vec<_> = result["logical_findings"].as_array().unwrap().iter()
+        .flat_map(|g| g["occurrences"].as_array().unwrap())
+        .map(|o| serde_json::json!({"occurrence_id":o["id"],"kind":"accepted_debt","reason":"Tracked synthetic source debt","reviewed_by":"fixture-reviewer","expires_at":expires})).collect();
+    serde_json::json!({"schema_version":1,"mode":"changes","exceptions":entries})
+}
+
+#[test]
+fn reviewed_exceptions_accept_only_exact_occurrences_and_expiry_restores_blocking() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let add = repo.commit(&[base], &[("original", token().as_bytes())]);
+    let original = report(repo.scan(Some(base), add, &[]), 1);
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("review.json");
+    let mut policy = reviewed_policy(&original);
+    fs::write(&file, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let accepted = report(
+        repo.scan(Some(base), add, &["--exceptions", file.to_str().unwrap()]),
+        0,
+    );
+    assert_eq!(accepted["findings_count"], 1);
+    assert_eq!(accepted["blocking_occurrences_count"], 0);
+    assert_eq!(accepted["accepted_occurrences_count"], 1);
+    assert_eq!(
+        accepted["logical_findings"][0]["occurrences"][0]["status"],
+        "accepted"
+    );
+    assert_eq!(accepted["exception_policy"]["matched_entries"], 1);
+    assert_eq!(accepted["exception_policy"]["unmatched_entries"], 0);
+    assert_eq!(
+        accepted["logical_findings"][0]["id"],
+        original["logical_findings"][0]["id"]
+    );
+    let copy = repo.commit(
+        &[add],
+        &[
+            ("original", token().as_bytes()),
+            ("copy", token().as_bytes()),
+        ],
+    );
+    let copied = report(
+        repo.scan(Some(base), copy, &["--exceptions", file.to_str().unwrap()]),
+        1,
+    );
+    assert_eq!(copied["accepted_occurrences_count"], 1);
+    assert_eq!(copied["blocking_occurrences_count"], 1);
+    assert_eq!(copied["logical_findings_count"], 1);
+    policy["exceptions"][0]["expires_at"] = "2000-01-01T00:00:00Z".into();
+    fs::write(&file, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let expired = report(
+        repo.scan(Some(base), add, &["--exceptions", file.to_str().unwrap()]),
+        1,
+    );
+    assert_eq!(expired["accepted_occurrences_count"], 0);
+    assert_eq!(expired["exception_policy"]["expired_entries"], 1);
+    assert_eq!(
+        expired["logical_findings"][0]["occurrences"][0]["exception"]["status"],
+        "expired"
+    );
+}
+
+#[test]
+fn proposed_or_checkout_exception_files_cannot_authorize_their_own_source_range() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let add = repo.commit(&[base], &[("secret", token().as_bytes())]);
+    let policy = serde_json::to_vec(&reviewed_policy(&report(
+        repo.scan(Some(base), add, &[]),
+        1,
+    )))
+    .unwrap();
+    fs::write(repo.dir.path().join("redflag-exceptions.json"), &policy).unwrap();
+    let proposed = repo.commit(
+        &[add],
+        &[
+            ("secret", token().as_bytes()),
+            ("redflag-exceptions.json", &policy),
+        ],
+    );
+    let self_approved = report(repo.scan(Some(base), proposed, &[]), 1);
+    assert_eq!(self_approved["accepted_occurrences_count"], 0);
+    assert_eq!(self_approved["exception_policy"]["entry_count"], 0);
+    // The same file becomes authoritative only on an independently trusted base/ref.
+    let trusted = repo.commit(&[base], &[("redflag-exceptions.json", &policy)]);
+    let accepted = report(repo.scan(Some(trusted), proposed, &[]), 0);
+    assert_eq!(accepted["accepted_occurrences_count"], 1);
+    assert_eq!(
+        accepted["exception_policy"]["origin"],
+        format!("git:{trusted}:redflag-exceptions.json")
+    );
+    let explicit = report(
+        repo.scan(
+            Some(base),
+            proposed,
+            &["--policy-ref", &trusted.to_string()],
+        ),
+        0,
+    );
+    assert_eq!(explicit["accepted_occurrences_count"], 1);
+    let disabled = report(repo.scan(Some(trusted), proposed, &["--no-exceptions"]), 1);
+    assert_eq!(disabled["accepted_occurrences_count"], 0);
+    let new_branch = report(repo.scan(None, proposed, &[]), 1);
+    assert_eq!(new_branch["accepted_occurrences_count"], 0);
+    let reviewed_branch = report(
+        repo.scan(None, proposed, &["--policy-ref", &trusted.to_string()]),
+        0,
+    );
+    assert_eq!(reviewed_branch["accepted_occurrences_count"], 1);
+}
+
+#[test]
+fn missing_malformed_wrong_scope_and_oversized_exception_policy_fail_closed() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let head = repo.commit(&[base], &[("secret", token().as_bytes())]);
+    let valid = reviewed_policy(&report(repo.scan(Some(base), head, &[]), 1));
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("review.json");
+    incomplete(repo.scan(Some(base), head, &["--exceptions", file.to_str().unwrap()]));
+    for (key, value) in [
+        ("schema_version", serde_json::json!(999)),
+        ("mode", serde_json::json!("artifacts")),
+        ("unexpected", serde_json::json!(true)),
+    ] {
+        let mut bad = valid.clone();
+        bad[key] = value;
+        fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
+        incomplete(repo.scan(Some(base), head, &["--exceptions", file.to_str().unwrap()]));
+    }
+    fs::write(&file, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    incomplete(repo.scan(Some(base), head, &["--exceptions", file.to_str().unwrap()]));
+    for bytes in [b"not JSON".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
+        let bad_base = repo.commit(&[], &[("redflag-exceptions.json", &bytes)]);
+        let bad_head = repo.commit(
+            &[bad_base],
+            &[
+                ("redflag-exceptions.json", &bytes),
+                ("secret", token().as_bytes()),
+            ],
+        );
+        incomplete(repo.scan(Some(bad_base), bad_head, &[]));
+        report(repo.scan(Some(bad_base), bad_head, &["--no-exceptions"]), 1);
+    }
+    let target = repo.git.blob(b"elsewhere").unwrap();
+    let symlink = repo.commit_entries(&[], &[("redflag-exceptions.json", target, 0o120000)]);
+    incomplete(repo.scan(Some(symlink), head, &[]));
+}
+
+#[test]
+fn additional_detector_evidence_requires_a_new_reviewed_occurrence() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let head = repo.commit(&[base], &[("secret", token().as_bytes())]);
+    let dir = tempdir().unwrap();
+    let policy = dir.path().join("review.json");
+    fs::write(
+        &policy,
+        serde_json::to_vec(&reviewed_policy(&report(
+            repo.scan(Some(base), head, &[]),
+            1,
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = dir.path().join("config.toml");
+    fs::write(&config, "[[patterns]]\nname = 'second-provider-rule'\npattern = 'ghp_[A-Za-z0-9]{36}'\ndescription = 'Independent evidence'\nseverity = 'Critical'\n").unwrap();
+    let result = report(
+        repo.scan(
+            Some(base),
+            head,
+            &[
+                "--exceptions",
+                policy.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+            ],
+        ),
+        1,
+    );
+    assert_eq!(result["findings_count"], 2);
+    assert_eq!(result["blocking_occurrences_count"], 1);
+    assert_eq!(result["accepted_occurrences_count"], 0);
+    assert_eq!(result["exception_policy"]["unmatched_entries"], 1);
+}
+
+#[test]
+fn reviewed_source_debt_never_becomes_an_artifact_exception() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let head = repo.commit(&[base], &[("secret", token().as_bytes())]);
+    let policy = reviewed_policy(&report(repo.scan(Some(base), head, &[]), 1));
+    fs::write(
+        repo.dir.path().join("redflag-exceptions.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    let dist = repo.dir.path().join("dist");
+    fs::create_dir(&dist).unwrap();
+    fs::write(dist.join("secret"), token()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .current_dir(repo.dir.path())
+        .arg("artifacts")
+        .arg(&dist)
+        .args([
+            "--engine",
+            "native",
+            "--no-config",
+            "--format",
+            "json",
+            "--private-env",
+            "RF_PUBLICATION",
+        ])
+        .env("RF_PUBLICATION", token())
+        .output()
+        .unwrap();
+    let result = report(output, 1);
+    assert_eq!(result["accepted_occurrences_count"], 0);
+    assert_eq!(result["blocking_occurrences_count"], 1);
+    assert_eq!(result["findings_count"], 2);
+    assert_eq!(result["exception_policy"]["entry_count"], 0);
+    assert_eq!(result["exception_policy"]["mode"], "artifacts");
+}
+
+#[test]
+fn github_reviewed_occurrences_stay_visible_without_error_annotations() {
+    let repo = Repo::new();
+    let base = repo.commit(&[], &[]);
+    let head = repo.commit(&[base], &[("secret", token().as_bytes())]);
+    let dir = tempdir().unwrap();
+    let policy_file = dir.path().join("review.json");
+    let mut policy = reviewed_policy(&report(repo.scan(Some(base), head, &[]), 1));
+    policy["exceptions"][0]["reason"] = "Tracked debt\n::error::injected [link](url)".into();
+    fs::write(&policy_file, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let summary = dir.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("changes")
+        .arg(repo.dir.path())
+        .args([
+            "--engine",
+            "native",
+            "--format",
+            "github",
+            "--base",
+            &base.to_string(),
+            "--head",
+            &head.to_string(),
+        ])
+        .arg("--exceptions")
+        .arg(&policy_file)
+        .arg("--github-summary")
+        .arg(&summary)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("::notice "));
+    assert!(!stdout.contains("::error"));
+    let text = fs::read_to_string(summary).unwrap();
+    assert!(text.contains("Accepted by reviewed exception: 1"));
+    assert!(text.contains("accepted"));
+    assert!(text.contains("Tracked debt"));
+    assert!(!text.contains("[link](url)"));
+    assert!(!text.contains(&token()));
+}
+
 #[test]
 fn introduced_commits_retain_deleted_and_reintroduced_secrets() {
     let repo = Repo::new();
@@ -165,7 +432,7 @@ fn introduced_commits_retain_deleted_and_reintroduced_secrets() {
     );
     assert_eq!(result["coverage"]["base"], base.to_string());
     assert_eq!(result["coverage"]["skipped"][0]["reason"], "deleted");
-    assert_eq!(result["schema_version"], 2);
+    assert_eq!(result["schema_version"], 3);
     assert_eq!(result["logical_findings_count"], 1);
     assert_eq!(result["occurrences_count"], 2);
     let occurrences = result["logical_findings"][0]["occurrences"]

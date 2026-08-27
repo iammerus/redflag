@@ -1,11 +1,20 @@
 # Findings and occurrence identities
 
-`changes --format json` and `artifacts --format json` emit schema version 2.
+`changes --format json` and `artifacts --format json` emit schema version 3.
 The envelope retains `mode`, `complete`, `scanner_version`, `coverage`,
 `findings_count` and the original flat `findings` observations. It adds
 `logical_findings`, `logical_findings_count`, `occurrences_count` and
 `identity_schema: "redflag-occurrence-v1"`. Counts of detector observations,
 logical findings and occurrences have different meanings.
+
+Schema 3 adds occurrence dispositions and reviewed policy provenance. It retains
+the schema 2 observation/group structure and the same identity algorithm. Use
+`blocking_occurrences_count` for the gate; `accepted_occurrences_count` identifies
+reviewed exceptions. `findings_count` remains the total detector observation count,
+including accepted evidence. Every occurrence has `status` (`blocking` or
+`accepted`) and, when matched, an `exception` with review status, kind, reason,
+reviewer and expiry. Groups also include `blocking_occurrence_count`. See
+[EXCEPTIONS.md](EXCEPTIONS.md) for trust selection and expiry behavior.
 
 A logical finding groups equal captured values across locations. Each group
 contains its ID, title, maximum severity, rule IDs and severities, declared private
@@ -54,8 +63,9 @@ occurrence in another file gives it a new ID and changes group membership/ID;
 the unchanged occurrence keeps its ID. Changing a file version, source commit,
 rule or evidence changes the corresponding IDs. A source identity cannot serve
 as an artifact identity. Descriptions and severity do not define evidence identity.
-IDs are suitable for identifying an exact reviewed occurrence; they do not yet
-authorize exceptions. The reviewed-exception workflow is separate modernization work.
+IDs identify exact reviewed occurrences; the separately selected trusted exception
+policy determines whether a review applies. New occurrences require their own
+review records, and source policy does not authorize artifact publication.
 
 Private SHA-256 capture digests are used only inside the engine adapter and private
 temporary spools to group observations. They are never exported as credential
@@ -69,7 +79,7 @@ variable names, so treat them as workflow metadata with appropriate access contr
 Both modern text and JSON output wait for completed inspection and report
 preparation. A scan or validation failure leaves stdout empty. Output-device or
 temporary-file I/O failure during final rendering can still interrupt delivery;
-always require exit 0 before publication. Exit 1 means findings and exit 2 means
+always require exit 0 before publication. Exit 1 means blocking occurrences and exit 2 means
 an operational failure. Text escapes control characters in displayed paths and
 rule names and includes occurrence IDs and remediation without source snippets.
 
@@ -100,7 +110,8 @@ preserved. Parent directories must already exist. This uses GitHub's documented
 [workflow commands and summary file](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands),
 with [toolkit-compatible command escaping](https://github.com/actions/toolkit/blob/main/packages/core/src/command.ts).
 No API calls, tokens or PR comments are involved. The scanner's ordinary exit codes
-remain authoritative; every reported occurrence blocks, regardless of severity.
+remain authoritative; every unaccepted occurrence blocks, regardless of severity.
+Accepted reviews stay in the summary without error annotations.
 
 The summary includes completion status, observation/group/occurrence counts,
 selected source scope or artifact roots, detector information, occurrence IDs,

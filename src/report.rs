@@ -3,6 +3,7 @@ use crate::{
     artifacts::{digest, file_path, ArtifactCoverage},
     config::{ScanLimits, Severity},
     error::RedflagError,
+    exceptions::{Audit as ExceptionAudit, Policy as ExceptionPolicy, Review, ReviewStatus},
     scanner::{Finding, FindingHandler, FindingSpan},
 };
 use serde::{Deserialize, Serialize};
@@ -155,6 +156,22 @@ struct PhysicalOccurrence {
     location: Location,
     primary: FindingSpan,
     observations: Vec<ObservationPointer>,
+    review: Option<Review>,
+}
+
+impl PhysicalOccurrence {
+    fn accepted(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|r| r.status == ReviewStatus::Accepted)
+    }
+    fn status(&self) -> &'static str {
+        if self.accepted() {
+            "accepted"
+        } else {
+            "blocking"
+        }
+    }
 }
 
 struct PreparedGroup {
@@ -174,6 +191,7 @@ struct GroupHeader<'a> {
     private_env: &'a BTreeSet<String>,
     remediation: &'static str,
     occurrence_count: usize,
+    blocking_occurrence_count: usize,
 }
 
 #[derive(Serialize)]
@@ -191,6 +209,9 @@ pub(crate) struct ReportOccurrence {
     pub location: Location,
     pub primary: FindingSpan,
     pub evidence: Vec<DetectorEvidence>,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exception: Option<Review>,
 }
 
 impl ReportHandler {
@@ -232,14 +253,29 @@ impl ReportHandler {
         mut self,
         context: ReportContext,
         coverage: &impl ReportCoverage,
-    ) -> Result<(), RedflagError> {
+        policy: ExceptionPolicy,
+    ) -> Result<u8, RedflagError> {
+        policy.validate_mode(context.mode)?;
         self.spool.flush()?;
         self.spool.get_mut().rewind()?;
         let file = self.spool.into_inner().map_err(|e| e.into_error())?;
         let mut reader = BufReader::new(file);
-        let groups = prepare(&mut reader, &context)?;
+        let mut groups = prepare(&mut reader, &context)?;
+        let exception_audit = apply_reviews(&mut groups, policy)?;
+        let total = groups.iter().map(|g| g.occurrences.len()).sum::<usize>();
+        let blocking = total - exception_audit.accepted_occurrences;
+        let exit = u8::from(blocking > 0);
         if let Some(path) = self.github_summary {
-            return github::render(&groups, &context, &mut reader, coverage, &path, self.count);
+            github::render(
+                &groups,
+                &context,
+                &mut reader,
+                coverage,
+                &path,
+                self.count,
+                &exception_audit,
+            )?;
+            return Ok(exit);
         }
         let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
@@ -254,17 +290,23 @@ impl ReportHandler {
                     findings_count: usize,
                     logical_findings_count: usize,
                     occurrences_count: usize,
+                    blocking_occurrences_count: usize,
+                    accepted_occurrences_count: usize,
+                    exception_policy: &'a ExceptionAudit,
                     identity_schema: &'static str,
                     coverage: &'a T,
                 }
                 let header = Header {
-                    schema_version: 2,
+                    schema_version: 3,
                     mode: context.mode,
                     complete: true,
                     scanner_version: env!("CARGO_PKG_VERSION"),
                     findings_count: self.count,
                     logical_findings_count: groups.len(),
-                    occurrences_count: groups.iter().map(|g| g.occurrences.len()).sum(),
+                    occurrences_count: total,
+                    blocking_occurrences_count: blocking,
+                    accepted_occurrences_count: exception_audit.accepted_occurrences,
+                    exception_policy: &exception_audit,
                     identity_schema: "redflag-occurrence-v1",
                     coverage,
                 };
@@ -351,21 +393,37 @@ impl ReportHandler {
                                 .join(", ")
                         )?;
                         writeln!(writer, "    Occurrence: {}", occurrence.id)?;
+                        writeln!(writer, "    Status: {}", occurrence.status())?;
+                        if let Some(review) = &occurrence.review {
+                            writeln!(
+                                writer,
+                                "    Exception: {} (reviewed by {}; expires {})",
+                                clean_text(&review.reason),
+                                clean_text(&review.reviewed_by),
+                                clean_text(&review.expires_at)
+                            )?;
+                            if review.status == ReviewStatus::Expired {
+                                writeln!(
+                                    writer,
+                                    "    This exception has expired; the occurrence blocks."
+                                )?;
+                            }
+                        }
                     }
                     writeln!(writer, "  {}", header.remediation)?;
                 }
                 writeln!(
                     writer,
-                    "{} inspection complete: {} logical finding(s), {} occurrence(s).",
+                    "{} inspection complete: {} logical finding(s), {} occurrence(s); {} blocking, {} accepted by review.",
                     context.mode,
                     groups.len(),
-                    groups.iter().map(|g| g.occurrences.len()).sum::<usize>()
+                    total, blocking, exception_audit.accepted_occurrences
                 )?;
             }
             ReportFormat::Github => unreachable!("GitHub summary is prepared in new"),
         }
         writer.flush()?;
-        Ok(())
+        Ok(exit)
     }
 }
 
@@ -479,6 +537,7 @@ fn prepare(
                     location: observation.location.clone(),
                     primary: observation.primary.clone(),
                     observations: vec![observation],
+                    review: None,
                 });
             }
         }
@@ -522,7 +581,10 @@ impl PreparedGroup {
             rules: &self.rules,
             private_env: &self.private_env,
             occurrence_count: self.occurrences.len(),
-            remediation: if mode == "changes" {
+            blocking_occurrence_count: self.occurrences.iter().filter(|o| !o.accepted()).count(),
+            remediation: if self.occurrences.iter().all(PhysicalOccurrence::accepted) {
+                "Revisit the reviewed exception before expiry. Acceptance does not establish revocation."
+            } else if mode == "changes" {
                 "Remove the credential from introduced commits and use a runtime secret reference. Rotate it if it was pushed or shared; removal does not establish revocation."
             } else if private {
                 "Remove the declared private value from publication inputs, rebuild and scan again before upload. Rotate it if it was exposed."
@@ -556,7 +618,34 @@ fn read_occurrence(
         location: occurrence.location.clone(),
         primary: occurrence.primary.clone(),
         evidence,
+        status: occurrence.status(),
+        exception: occurrence.review.clone(),
     })
+}
+
+fn apply_reviews(
+    groups: &mut [PreparedGroup],
+    policy: ExceptionPolicy,
+) -> Result<ExceptionAudit, RedflagError> {
+    let now = chrono::Utc::now();
+    let mut seen = BTreeSet::new();
+    let mut matched = BTreeSet::new();
+    let mut accepted = 0;
+    for group in groups {
+        for occurrence in &mut group.occurrences {
+            if !seen.insert(occurrence.id.clone()) {
+                return Err(invalid("Multiple logical candidates share an occurrence identity; review ambiguous detector evidence"));
+            }
+            occurrence.review = policy.review(&occurrence.id, now);
+            if occurrence.review.is_some() {
+                matched.insert(occurrence.id.clone());
+            }
+            if occurrence.accepted() {
+                accepted += 1;
+            }
+        }
+    }
+    Ok(policy.audit(now, &matched, accepted))
 }
 
 fn normalized_path(path: &Path) -> Result<String, RedflagError> {

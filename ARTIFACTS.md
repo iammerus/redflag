@@ -68,10 +68,12 @@ unexpected warning or error. Engine logs and secret captures are never forwarded
 Decoding and archive inspection remain separate modernization work; transformed
 or compressed inner content is not yet certified as inspected.
 
-Artifact JSON uses a version 2 envelope with mode, completion status, scanner
+Artifact JSON uses a version 3 envelope with mode, completion status, scanner
 version, grouped logical findings, occurrence IDs, remediation, the original flat
 findings and separate observation/group/occurrence counts. See
 [REPORTING.md](REPORTING.md) for the schema and identity contract.
+Version 3 distinguishes blocking and accepted occurrences; source baselines never
+apply to artifact scans, so they cannot authorize publishing a previously seen value.
 Coverage includes resolved targets,
 every selected file's relative path, size and SHA-256, selected private variable
 names, resource limits, representations, engine version and executable/config
