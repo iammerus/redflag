@@ -12,19 +12,25 @@ use std::{
 
 const POLICY_FILE: &str = "redflag-exceptions.json";
 const MAX_POLICY_BYTES: usize = 1024 * 1024;
-const MAX_ENTRIES: usize = 10_000;
+pub(crate) const MAX_ENTRIES: usize = 10_000;
 
 #[derive(clap::Args)]
 pub(crate) struct ExceptionArgs {
     /// Read reviewed occurrence exceptions from this explicitly trusted file
     #[arg(long, value_name = "FILE", conflicts_with = "no_exceptions")]
     exceptions: Option<PathBuf>,
-    /// Do not load occurrence exceptions from the trusted policy revision
+    /// Apply no occurrence exceptions
     #[arg(long)]
     no_exceptions: bool,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+impl ExceptionArgs {
+    pub fn path(&self) -> Option<&Path> {
+        self.exceptions.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExceptionKind {
     FalsePositive,
@@ -61,14 +67,16 @@ pub(crate) struct Policy {
     entries: BTreeMap<String, ValidatedEntry>,
 }
 
-#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReviewStatus {
     Accepted,
     Expired,
+    RejectedPrivateValue,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Review {
     pub status: ReviewStatus,
     pub kind: ExceptionKind,
@@ -77,9 +85,10 @@ pub(crate) struct Review {
     pub expires_at: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Audit {
-    pub mode: &'static str,
+    pub mode: String,
     pub origin: String,
     pub sha256: Option<String>,
     pub evaluated_at: String,
@@ -88,6 +97,24 @@ pub(crate) struct Audit {
     pub unmatched_entries: usize,
     pub expired_entries: usize,
     pub accepted_occurrences: usize,
+    pub rejected_private_occurrences: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArtifactApproval {
+    pub policy: Audit,
+    pub occurrences: Vec<AcceptedArtifact>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AcceptedArtifact {
+    pub occurrence_id: String,
+    pub target: usize,
+    pub path: PathBuf,
+    pub file_sha256: String,
+    pub review: Review,
 }
 
 impl Policy {
@@ -109,21 +136,7 @@ impl Policy {
             return Ok(Self::disabled("changes", "disabled by --no-exceptions"));
         }
         if let Some(path) = &args.exceptions {
-            let mut file = File::open(path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.len() > MAX_POLICY_BYTES as u64 {
-                return Err(invalid(
-                    "Exception policy must be a regular file of at most 1 MiB",
-                ));
-            }
-            let mut bytes = Vec::new();
-            file.by_ref()
-                .take(MAX_POLICY_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            return Self::parse(
-                &bytes,
-                format!("file:{}", std::fs::canonicalize(path)?.display()),
-            );
+            return Self::read_file(path, "changes");
         }
         let Some(revision) = revision else {
             return Ok(Self::disabled("changes", "no trusted policy revision"));
@@ -151,40 +164,88 @@ impl Policy {
             ));
         }
         let blob = repo.find_blob(entry.id())?;
-        Self::parse(blob.content(), format!("git:{revision}:{POLICY_FILE}"))
+        Self::parse(
+            blob.content(),
+            format!("git:{revision}:{POLICY_FILE}"),
+            "changes",
+        )
     }
 
-    fn parse(bytes: &[u8], origin: String) -> Result<Self, RedflagError> {
+    pub fn load_artifacts(args: &ExceptionArgs) -> Result<Self, RedflagError> {
+        if let Some(path) = &args.exceptions {
+            return Self::read_file(path, "artifacts");
+        }
+        Ok(Self::disabled(
+            "artifacts",
+            if args.no_exceptions {
+                "disabled by --no-exceptions"
+            } else {
+                "no explicit artifact exception policy; source baselines do not apply"
+            },
+        ))
+    }
+
+    fn read_file(path: &Path, mode: &'static str) -> Result<Self, RedflagError> {
+        // Opening a FIFO can block before File::metadata is available.
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file() || metadata.len() > MAX_POLICY_BYTES as u64 {
+            return Err(invalid(
+                "Exception policy must be a regular file of at most 1 MiB",
+            ));
+        }
+        let mut file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > MAX_POLICY_BYTES as u64 {
+            return Err(invalid(
+                "Exception policy must be a regular file of at most 1 MiB",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(MAX_POLICY_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Self::parse(
+            &bytes,
+            format!("file:{}", std::fs::canonicalize(path)?.display()),
+            mode,
+        )
+    }
+
+    pub fn redact_metadata(&mut self, private: &crate::protected_values::ProtectedValues) {
+        let redact = |value: &mut String| {
+            if private.contains(value) {
+                *value = "[REDACTED PRIVATE VALUE]".into();
+            }
+        };
+        redact(&mut self.origin);
+        for entry in self.entries.values_mut() {
+            redact(&mut entry.entry.reason);
+            redact(&mut entry.entry.reviewed_by);
+        }
+    }
+
+    fn parse(bytes: &[u8], origin: String, mode: &'static str) -> Result<Self, RedflagError> {
         if bytes.len() > MAX_POLICY_BYTES {
             return Err(invalid("Exception policy exceeds 1 MiB"));
         }
         let policy: PolicyFile = serde_json::from_slice(bytes).map_err(|error|
             invalid(&format!("Invalid exception policy JSON at line {}, column {}; check required fields and remove unknown fields", error.line(), error.column())))?;
-        if policy.schema_version != 1 || policy.mode != "changes" {
-            return Err(invalid(
-                "Source exceptions require schema_version 1 and mode changes",
-            ));
+        if policy.schema_version != 1 || policy.mode != mode {
+            return Err(invalid(&format!("Exception policy requires schema_version 1 and mode {mode}; source baselines cannot authorize artifact publication")));
         }
         if policy.exceptions.len() > MAX_ENTRIES {
             return Err(invalid("Exception policy exceeds 10000 entries"));
         }
         let mut entries = BTreeMap::new();
         for entry in policy.exceptions {
+            if mode == "artifacts" && entry.kind != ExceptionKind::FalsePositive {
+                return Err(invalid("Artifact exceptions must be reviewed false positives; accepted source debt cannot authorize publication"));
+            }
             if !valid_occurrence_id(&entry.occurrence_id) {
                 return Err(invalid("Exceptions require an exact rf-occurrence-v1 ID; groups, values and glob patterns are not accepted"));
             }
-            if entry.reason.trim().is_empty()
-                || entry.reason.len() > 1024
-                || entry.reviewed_by.trim().is_empty()
-                || entry.reviewed_by.len() > 256
-            {
-                return Err(invalid(
-                    "Each exception requires a reason (1–1024 bytes) and reviewed_by (1–256 bytes)",
-                ));
-            }
-            let expires = DateTime::parse_from_rfc3339(&entry.expires_at)
-                .map_err(|_| invalid("Exception expires_at must be a complete RFC 3339 timestamp with a timezone"))?
-                .with_timezone(&Utc);
+            let expires =
+                validate_review_fields(&entry.reason, &entry.reviewed_by, &entry.expires_at)?;
             let key = entry.occurrence_id.clone();
             if entries
                 .insert(key, ValidatedEntry { entry, expires })
@@ -196,7 +257,7 @@ impl Policy {
             }
         }
         Ok(Self {
-            mode: "changes",
+            mode,
             origin,
             sha256: Some(digest(bytes)),
             entries,
@@ -231,9 +292,10 @@ impl Policy {
         now: DateTime<Utc>,
         matched: &BTreeSet<String>,
         accepted_occurrences: usize,
+        rejected_private_occurrences: usize,
     ) -> Audit {
         Audit {
-            mode: self.mode,
+            mode: self.mode.into(),
             origin: self.origin,
             sha256: self.sha256,
             evaluated_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -242,17 +304,39 @@ impl Policy {
             unmatched_entries: self.entries.len().saturating_sub(matched.len()),
             expired_entries: self.entries.values().filter(|e| e.expires <= now).count(),
             accepted_occurrences,
+            rejected_private_occurrences,
         }
     }
 }
 
-fn valid_occurrence_id(value: &str) -> bool {
+pub(crate) fn valid_occurrence_id(value: &str) -> bool {
     value.strip_prefix("rf-occurrence-v1:").is_some_and(|hash| {
         hash.len() == 64
             && hash
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
+}
+
+pub(crate) fn validate_review_fields(
+    reason: &str,
+    reviewed_by: &str,
+    expires_at: &str,
+) -> Result<DateTime<Utc>, RedflagError> {
+    if reason.trim().is_empty()
+        || reason.len() > 1024
+        || reviewed_by.trim().is_empty()
+        || reviewed_by.len() > 256
+    {
+        return Err(invalid(
+            "Each exception requires a reason (1–1024 bytes) and reviewed_by (1–256 bytes)",
+        ));
+    }
+    DateTime::parse_from_rfc3339(expires_at)
+        .map(|time| time.with_timezone(&Utc))
+        .map_err(|_| {
+            invalid("Exception expires_at must be a complete RFC 3339 timestamp with a timezone")
+        })
 }
 fn invalid(message: &str) -> RedflagError {
     RedflagError::Config(message.into())
@@ -271,6 +355,7 @@ mod tests {
             )
             .unwrap(),
             "fixture".into(),
+            "changes",
         )
     }
     #[test]
@@ -290,7 +375,7 @@ mod tests {
         );
         assert!(policy.review(&id, now).unwrap().status == ReviewStatus::Expired);
         assert!(policy.review("unknown", now).is_none());
-        let audit = policy.audit(now, &BTreeSet::from([id]), 0);
+        let audit = policy.audit(now, &BTreeSet::from([id]), 0, 0);
         assert_eq!(audit.unmatched_entries, 1);
         assert_eq!(audit.expired_entries, 2);
     }

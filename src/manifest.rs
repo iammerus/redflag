@@ -3,16 +3,20 @@ use crate::{
     config::{Config, ScanLimits},
     engine::EngineInfo,
     error::RedflagError,
+    exceptions::{self, ArtifactApproval, ExceptionKind, ReviewStatus},
+    report::PreparedReport,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
 };
 use tempfile::NamedTempFile;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +29,8 @@ struct Manifest {
     config_sha256: String,
     complete: bool,
     findings_count: usize,
+    blocking_occurrences_count: usize,
+    approval: ArtifactApproval,
     targets: Vec<ArtifactTarget>,
     files: Vec<ArtifactFile>,
     total_bytes: u64,
@@ -34,15 +40,19 @@ struct Manifest {
     limits: ScanLimits,
 }
 
-/// A failed rescan must not leave an earlier clean manifest available for upload.
-/// Stage outside publication inputs and persist only after a complete clean scan.
+/// A failed rescan must not leave an earlier approved manifest available for upload.
+/// Stage outside publication inputs and persist only after a complete scan without blockers.
 pub(crate) struct ManifestOutput {
     destination: PathBuf,
     staged: NamedTempFile,
 }
 
 impl ManifestOutput {
-    pub fn prepare(path: &Path, inputs: &[PathBuf]) -> Result<Self, RedflagError> {
+    pub fn prepare(
+        path: &Path,
+        inputs: &[PathBuf],
+        policy_inputs: &[&Path],
+    ) -> Result<Self, RedflagError> {
         let name = path.file_name().ok_or_else(|| {
             RedflagError::Config("Choose a manifest filename outside artifact targets".into())
         })?;
@@ -55,6 +65,11 @@ impl ManifestOutput {
             source,
         })?;
         let destination = parent.join(name);
+        for input in policy_inputs {
+            if fs::canonicalize(input).is_ok_and(|input| input == destination) {
+                return Err(RedflagError::Config("Manifest output must be separate from configuration and exception policy inputs".into()));
+            }
+        }
         for input in inputs {
             if fs::canonicalize(input).is_ok_and(|root| destination.starts_with(root)) {
                 return Err(RedflagError::Config(
@@ -87,7 +102,16 @@ impl ManifestOutput {
         mut self,
         coverage: &ArtifactCoverage,
         config_sha256: String,
+        report: &PreparedReport,
     ) -> Result<(), RedflagError> {
+        let (findings_count, approval) = report.artifact_approval()?;
+        validate_approval(
+            &approval,
+            findings_count,
+            &coverage.files,
+            &coverage.limits,
+            Utc::now(),
+        )?;
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             scanner_version: env!("CARGO_PKG_VERSION").into(),
@@ -95,7 +119,9 @@ impl ManifestOutput {
             detector: coverage.engine.clone(),
             config_sha256,
             complete: true,
-            findings_count: 0,
+            findings_count,
+            blocking_occurrences_count: 0,
+            approval,
             targets: coverage.targets.clone(),
             files: coverage.files.clone(),
             total_bytes: coverage.total_bytes,
@@ -131,6 +157,9 @@ pub(crate) struct Verification {
     pub engine: String,
     pub detector: EngineInfo,
     pub private_env: Vec<String>,
+    pub findings_count: usize,
+    pub accepted_occurrences_count: usize,
+    pub exception_policy: exceptions::Audit,
 }
 
 pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification, RedflagError> {
@@ -141,7 +170,11 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
             ..ScanLimits::default()
         },
     )?;
-    let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| {
+        RedflagError::Config(
+            "Manifest is not a supported schema 3 scan; scan the publication inputs again".into(),
+        )
+    })?;
     if manifest.schema_version != SCHEMA_VERSION
         || manifest.scanner_version != env!("CARGO_PKG_VERSION")
         || manifest.engine != manifest.detector.name
@@ -149,7 +182,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         || (manifest.detector.name == "redflag-native"
             && manifest.detector.config_sha256 != manifest.config_sha256)
         || !manifest.complete
-        || manifest.findings_count != 0
+        || manifest.blocking_occurrences_count != 0
         || manifest.symlinks != "reject"
         || manifest.total_bytes == 0
         || manifest.files.is_empty()
@@ -161,7 +194,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         || !valid_digest(&manifest.config_sha256)
     {
         return Err(RedflagError::Config(
-            "Manifest is not a supported complete clean scan. Scan the publication inputs again."
+            "Manifest is not a supported complete scan without blockers. Scan the publication inputs again."
                 .into(),
         ));
     }
@@ -170,6 +203,13 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         ..Config::default()
     };
     config.validate()?;
+    validate_approval(
+        &manifest.approval,
+        manifest.findings_count,
+        &manifest.files,
+        &manifest.limits,
+        Utc::now(),
+    )?;
     if manifest.targets.is_empty()
         || manifest.targets.len() > manifest.files.len()
         || manifest.files.len() > manifest.limits.max_files
@@ -227,6 +267,15 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
             "Manifest total does not match its files".into(),
         ));
     }
+    // Inventory verification may take time. Approval must still be active when
+    // verification finishes, not just when it began.
+    validate_approval(
+        &manifest.approval,
+        manifest.findings_count,
+        &manifest.files,
+        &manifest.limits,
+        Utc::now(),
+    )?;
     Ok(Verification {
         manifest: fs::canonicalize(path)?,
         files: manifest.files.len(),
@@ -236,7 +285,80 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         engine: manifest.engine,
         detector: manifest.detector,
         private_env: manifest.private_env,
+        findings_count: manifest.findings_count,
+        accepted_occurrences_count: manifest.approval.occurrences.len(),
+        exception_policy: manifest.approval.policy,
     })
+}
+
+fn validate_approval(
+    approval: &ArtifactApproval,
+    findings_count: usize,
+    files: &[ArtifactFile],
+    limits: &ScanLimits,
+    now: DateTime<Utc>,
+) -> Result<(), RedflagError> {
+    let policy = &approval.policy;
+    let count = approval.occurrences.len();
+    let invalid = || {
+        RedflagError::Config("Manifest does not contain a consistent artifact review; scan the publication inputs again".into())
+    };
+    if policy.mode != "artifacts"
+        || policy.entry_count > exceptions::MAX_ENTRIES
+        || policy.matched_entries != count
+        || policy.accepted_occurrences != count
+        || policy.entry_count < count
+        || policy.unmatched_entries != policy.entry_count - count
+        || policy.expired_entries > policy.unmatched_entries
+        || policy.rejected_private_occurrences != 0
+        || findings_count > limits.max_findings
+        || findings_count < count
+        || (findings_count > 0 && count == 0)
+        || policy
+            .sha256
+            .as_ref()
+            .is_some_and(|hash| !valid_digest(hash))
+        || (policy.sha256.is_none() && policy.entry_count != 0)
+        || policy.origin.trim().is_empty()
+    {
+        return Err(invalid());
+    }
+    let evaluated = DateTime::parse_from_rfc3339(&policy.evaluated_at)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    if evaluated > now {
+        return Err(invalid());
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let inventory: BTreeMap<_, _> = files
+        .iter()
+        .map(|file| ((file.target, file.path.as_path()), file.sha256.as_str()))
+        .collect();
+    let mut ids = BTreeSet::new();
+    for accepted in &approval.occurrences {
+        if !exceptions::valid_occurrence_id(&accepted.occurrence_id)
+            || !ids.insert(&accepted.occurrence_id)
+            || accepted.review.status != ReviewStatus::Accepted
+            || accepted.review.kind != ExceptionKind::FalsePositive
+            || inventory
+                .get(&(accepted.target, accepted.path.as_path()))
+                .copied()
+                != Some(accepted.file_sha256.as_str())
+        {
+            return Err(invalid());
+        }
+        let expires = exceptions::validate_review_fields(
+            &accepted.review.reason,
+            &accepted.review.reviewed_by,
+            &accepted.review.expires_at,
+        )?;
+        if expires <= evaluated || expires <= now {
+            return Err(RedflagError::Config("An artifact review in the manifest has expired; review and rescan before publication".into()));
+        }
+    }
+    Ok(())
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -244,4 +366,65 @@ fn valid_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn artifact_approval_expires_at_the_exact_boundary() {
+        let now = DateTime::parse_from_rfc3339("2026-09-12T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let file = ArtifactFile {
+            target: 0,
+            path: "bundle.js".into(),
+            bytes: 10,
+            sha256: "b".repeat(64),
+        };
+        let approval = ArtifactApproval {
+            policy: exceptions::Audit {
+                mode: "artifacts".into(),
+                origin: "fixture".into(),
+                sha256: Some("a".repeat(64)),
+                evaluated_at: now.to_rfc3339(),
+                entry_count: 1,
+                matched_entries: 1,
+                unmatched_entries: 0,
+                expired_entries: 0,
+                accepted_occurrences: 1,
+                rejected_private_occurrences: 0,
+            },
+            occurrences: vec![exceptions::AcceptedArtifact {
+                occurrence_id: format!("rf-occurrence-v1:{}", "c".repeat(64)),
+                target: 0,
+                path: file.path.clone(),
+                file_sha256: file.sha256.clone(),
+                review: exceptions::Review {
+                    status: ReviewStatus::Accepted,
+                    kind: ExceptionKind::FalsePositive,
+                    reason: "Reviewed fixture".into(),
+                    reviewed_by: "reviewer".into(),
+                    expires_at: "2026-09-12T12:01:00Z".into(),
+                },
+            }],
+        };
+        let files = vec![file];
+        assert!(validate_approval(
+            &approval,
+            1,
+            &files,
+            &ScanLimits::default(),
+            now + chrono::Duration::seconds(59)
+        )
+        .is_ok());
+        assert!(validate_approval(
+            &approval,
+            1,
+            &files,
+            &ScanLimits::default(),
+            now + chrono::Duration::seconds(60)
+        )
+        .is_err());
+    }
 }

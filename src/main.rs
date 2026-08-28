@@ -42,13 +42,15 @@ enum Commands {
         no_config: bool,
         #[command(flatten)]
         report: report::ReportArgs,
+        #[command(flatten)]
+        exceptions: exceptions::ExceptionArgs,
         /// Match the exact value of this environment variable (repeat for each name)
         #[arg(long, value_name = "NAME")]
         private_env: Vec<String>,
         /// Explicitly accept a declared private value shorter than 8 bytes
         #[arg(long, value_name = "NAME")]
         allow_short_private_value: Vec<String>,
-        /// Write a clean-scan manifest outside the selected publication inputs
+        /// Write a publication manifest after complete inspection without blockers
         #[arg(long, value_name = "FILE")]
         manifest: Option<PathBuf>,
         /// General credential detector; native retains the legacy rule behavior
@@ -140,17 +142,31 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             config,
             no_config,
             report,
+            exceptions,
             private_env,
             allow_short_private_value,
             manifest,
             engine: engine_choice,
             betterleaks_path,
         } => {
+            // Resolve policy inputs without accepting their contents yet. Output
+            // preparation must not delete those inputs while invalidating a stale manifest.
+            let config_resolution =
+                Config::resolve_path(config, &std::env::current_dir()?, no_config);
+            let policy_inputs: Vec<&Path> = config_resolution
+                .as_ref()
+                .ok()
+                .and_then(|path| path.as_deref())
+                .into_iter()
+                .chain(exceptions.path())
+                .collect();
             let manifest_output = manifest
                 .as_ref()
-                .map(|path| manifest::ManifestOutput::prepare(path, &paths))
+                .map(|path| manifest::ManifestOutput::prepare(path, &paths, &policy_inputs))
                 .transpose()?;
-            let config_path = Config::resolve_path(config, &std::env::current_dir()?, no_config)?;
+            let config_path = config_resolution?;
+            let protected_config_path = config_path.clone();
+            let mut exception_policy = exceptions::Policy::load_artifacts(&exceptions)?;
             let config = Config::load(config_path)?;
             let config_sha256 = artifacts::digest(&serde_json::to_vec(&config)?);
             let engine = engine::GeneralEngine::prepare(
@@ -165,25 +181,22 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             }
             let protected =
                 protected_values::ProtectedValues::load(&private_env, &allow_short_private_value)?;
+            exception_policy.redact_metadata(&protected);
             let selected = artifacts::ArtifactSet::collect(&paths, scanner.limits())?;
             let mut handler = report::ReportHandler::new(report, scanner.limits())?;
             let coverage = selected.scan(&scanner, &protected, engine, &mut handler)?;
-            let exit = u8::from(handler.findings_count() > 0);
             let mut context = report::ReportContext::artifacts(&coverage)?;
             context.protect_output(manifest.as_deref());
+            context.protect_output(exceptions.path());
+            context.protect_output(protected_config_path.as_deref());
+            let report = handler.prepare_report(context, exception_policy)?;
+            let exit = report.exit_code();
             if exit == 0 {
                 if let Some(manifest) = manifest_output {
-                    manifest.write(&coverage, config_sha256)?;
+                    manifest.write(&coverage, config_sha256, &report)?;
                 }
             }
-            if let Err(error) = handler.finish_report(
-                context,
-                &coverage,
-                exceptions::Policy::disabled(
-                    "artifacts",
-                    "source exceptions do not apply to publication inputs",
-                ),
-            ) {
+            if let Err(error) = report.write(&coverage) {
                 if let Some(path) = manifest {
                     let _ = std::fs::remove_file(path);
                 }
@@ -197,7 +210,14 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
             format,
         } => {
             let verification = manifest::verify(&manifest, &target)?;
-            OutputHandler::new(format, false).finish_report("verify_artifacts", &verification)?;
+            match format {
+                output::OutputFormat::Json => OutputHandler::new(format, false)
+                    .finish_report("verify_artifacts", &verification)?,
+                output::OutputFormat::Text => {
+                    use std::io::Write;
+                    writeln!(std::io::stdout().lock(), "Publication inputs verified: {} files, {} bytes, {} reviewed false-positive occurrence(s); no blocking occurrences.", verification.files, verification.total_bytes, verification.accepted_occurrences_count)?;
+                }
+            }
             Ok(0)
         }
         Commands::ShowConfig {

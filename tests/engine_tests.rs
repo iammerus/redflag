@@ -264,7 +264,7 @@ fn private_values_and_custom_rules_remain_redacted_and_manifests_record_engine()
     report(scan(&file, &["--manifest", manifest.to_str().unwrap()]), 0);
     let manifest_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(manifest_json["schema_version"], 2);
+    assert_eq!(manifest_json["schema_version"], 3);
     assert_eq!(manifest_json["detector"]["name"], "betterleaks");
     let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
         .arg("verify-artifacts")
@@ -394,4 +394,56 @@ fn multipart_group_identity_includes_every_required_value() {
             assert_eq!(evidence["spans"].as_array().unwrap().len(), 2);
         }
     }
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn pinned_engine_artifact_reviews_cannot_override_declared_private_values() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("example.js");
+    fs::write(
+        &input,
+        format!("// synthetic public example\n{}\n", token()),
+    )
+    .unwrap();
+    let review = dir.path().join("review.json");
+    let manifest = dir.path().join("manifest.json");
+    let run = |private: bool, reviewed: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_redflag"));
+        command
+            .arg("artifacts")
+            .arg(&input)
+            .args(["--no-config", "--format", "json", "--betterleaks-path"])
+            .arg(engine_path())
+            .arg("--manifest")
+            .arg(&manifest);
+        if private {
+            command
+                .args(["--private-env", "RF_PINNED_PRIVATE"])
+                .env("RF_PINNED_PRIVATE", token());
+        }
+        if reviewed {
+            command.arg("--exceptions").arg(&review);
+        }
+        command.output().unwrap()
+    };
+    let save_review = |result: &serde_json::Value| {
+        fs::write(&review, serde_json::to_vec(&serde_json::json!({"schema_version":1,"mode":"artifacts","exceptions":[{
+            "occurrence_id":result["logical_findings"][0]["occurrences"][0]["id"], "kind":"false_positive", "reason":"Reviewed public synthetic example", "reviewed_by":"fixture-reviewer", "expires_at":(chrono::Utc::now()+chrono::Duration::hours(24)).to_rfc3339()
+        }]})).unwrap()).unwrap();
+    };
+    save_review(&report(run(false, false), 1));
+    let accepted = report(run(false, true), 0);
+    assert_eq!(accepted["accepted_occurrences_count"], 1);
+    assert!(manifest.exists());
+    save_review(&report(run(true, false), 1));
+    let rejected = run(true, true);
+    assert!(!String::from_utf8_lossy(&rejected.stdout).contains(&token()));
+    let rejected = report(rejected, 1);
+    assert_eq!(
+        rejected["exception_policy"]["rejected_private_occurrences"],
+        1
+    );
+    assert_eq!(rejected["accepted_occurrences_count"], 0);
+    assert!(!manifest.exists());
 }

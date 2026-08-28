@@ -9,7 +9,7 @@ Repeat `--private-env NAME` for each private value already available to the trus
 build. Redflag reads only those named variables; never pass secret values as CLI
 arguments or give an untrusted PR access to build secrets for this check.
 
-Exit codes are **0** for complete inspection without findings, **1** for findings,
+Exit codes are **0** for complete inspection without blockers, **1** for blocking occurrences,
 and **2** for an operational failure or incomplete inspection. Check the exit code
 before uploading. Inspection and report-preparation errors leave both text and
 JSON stdout empty; output I/O can still interrupt final delivery. Always check
@@ -72,8 +72,11 @@ Artifact JSON uses a version 3 envelope with mode, completion status, scanner
 version, grouped logical findings, occurrence IDs, remediation, the original flat
 findings and separate observation/group/occurrence counts. See
 [REPORTING.md](REPORTING.md) for the schema and identity contract.
-Version 3 distinguishes blocking and accepted occurrences; source baselines never
-apply to artifact scans, so they cannot authorize publishing a previously seen value.
+Version 3 distinguishes blocking and accepted occurrences. Source baselines never
+apply to artifact scans. An explicit `--exceptions FILE` can accept separately
+reviewed artifact false positives with exact IDs, reasons, reviewers and expiry;
+declared private values always block. There is no artifact exception discovery.
+See [EXCEPTIONS.md](EXCEPTIONS.md) for the review and trust contract.
 Coverage includes resolved targets,
 every selected file's relative path, size and SHA-256, selected private variable
 names, resource limits, representations, engine version and executable/config
@@ -83,7 +86,7 @@ existing `scan --format json` array remains compatible.
 In GitHub Actions, `--format github` emits general error annotations and appends a
 bounded job summary with artifact locations, identities, coverage and remediation.
 Place `GITHUB_STEP_SUMMARY` (or `--github-summary FILE`) outside publication inputs
-and separate from the manifest. Generated artifacts are not mapped to source-file
+and separate from the manifest and active configuration/exception files. Generated artifacts are not mapped to source-file
 lines. See [REPORTING.md](REPORTING.md) for limits and the complete output contract.
 
 Default limits in `[limits]` are 100,000 files, 64 MiB per file, 16 MiB per line,
@@ -109,10 +112,11 @@ redflag verify-artifacts scan-manifest.json
 # Publish dist only if both commands succeed, without rebuilding it in between.
 ```
 
-Store the manifest outside every selected artifact target. It is written atomically
-only after a complete scan without findings. Requesting the same manifest for a
+Store the manifest outside every selected artifact target and separate from active
+configuration and exception inputs. It is written atomically only after a complete
+scan and report classification without blockers. Requesting the same manifest for a
 rescan invalidates the old file before configuration or input validation, so a
-failed rescan cannot leave the previous clean result available. Artifact scans
+failed rescan cannot leave the previous approved result available. Artifact scans
 recheck inventory and hashes before reporting completion to catch changes during
 inspection.
 
@@ -128,7 +132,10 @@ empty files. Added, removed, changed or retyped files fail with exit 2. Metadata
 changes such as timestamps do not affect byte identity. The manifest records
 scanner/engine versions, the effective configuration digest and declared variable
 names; verification does not need the private environment values again.
-Manifests now use schema version 2 and include the pinned detector identity.
+Manifests use schema version 3 and include the pinned detector identity, policy
+audit and exact accepted artifact reviews. Verification validates review expiry
+before and after inventory verification. Earlier manifest schemas require a rescan.
+Verification reports accepted occurrence counts, including reviewed false positives.
 
 Keep the manifest in a trusted workflow workspace: it is an integrity record,
 not a signed attestation, and an edited manifest cannot prove a scan happened.

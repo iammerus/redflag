@@ -1,4 +1,4 @@
-# Reviewed source exceptions
+# Reviewed occurrence exceptions
 
 Source exceptions identify exact versioned occurrences. They require a recorded
 reason, reviewer and expiry; they never exempt a value, rule, path pattern or
@@ -90,14 +90,62 @@ Modern JSON schema 3 retains all observations and logical occurrences. Gate on
 
 Each occurrence has `status: "blocking"` or `"accepted"`, plus its matched review
 when present. The policy audit records origin, exact-file SHA-256, evaluation time,
-entry/match/unmatched/expired counts and accepted occurrences. Evidence identities
+entry/match/unmatched/expired counts, accepted occurrences and rejected private-value
+reviews. Evidence identities
 are unchanged by acceptance. Text and GitHub summaries retain accepted evidence and
 review metadata. GitHub error annotations cover blockers, displayed before accepted
 rows; accepted-only results emit a completion notice.
 
 Source baselines never load in `artifacts`, even when the working directory contains
-`redflag-exceptions.json`. The same provider value or declared private value in
-publication inputs still blocks and prevents a clean manifest. Artifact-scoped
-false-positive review is separate implementation work; the current source policy
-file does not authorize publication exceptions. Legacy `scan` does not apply this
-exception workflow.
+`redflag-exceptions.json`. Source policy does not authorize publication exceptions.
+Legacy `scan` does not apply this exception workflow.
+
+## Artifact false-positive reviews
+
+Artifact reviews require an explicit, separately trusted file. There is no artifact
+exception discovery, even for a file labelled with artifact mode. Use the same
+schema version 1 and entry fields shown above, with `mode: "artifacts"` and
+`kind: "false_positive"`. Copy exact IDs from the artifact report:
+
+```sh
+redflag artifacts dist --private-env INTERNAL_API_KEY --format json > artifact-report.json
+redflag artifacts dist --private-env INTERNAL_API_KEY \
+  --exceptions /trusted/artifact-reviews.json --manifest scan-manifest.json
+redflag verify-artifacts scan-manifest.json
+```
+
+Artifact mode rejects source policy and `accepted_debt` entries. A trusted reviewer
+must establish that the particular occurrence is a false positive; Redflag does
+not infer that a value is benign or that a credential has been revoked.
+
+Declared private values always block publication. Even a review targeting the exact
+private occurrence ID receives `rejected_private_value` status, with either engine.
+If a reason, reviewer label or policy origin contains a declared private value,
+Redflag masks that entire field as `[REDACTED PRIVATE VALUE]`. The recorded policy
+SHA-256 still identifies the original file bytes.
+
+Artifact IDs include mode, target index, relative path, whole-file version and
+detector evidence. Moving a root with unchanged contents and target order retains
+IDs. A new file, occurrence, changed file bytes or additional detector evidence
+requires its own review. An unchanged occurrence in the same file can retain its
+review across builds until expiry; the value is never exempted globally.
+
+## Publication manifests and expiry
+
+Schema 3 manifests record total observations, zero blocking occurrences, the policy
+audit and each accepted occurrence's ID, target, relative path, file SHA-256 and
+review. Report classification precedes manifest creation. Expired reviews or
+private-value matches prevent a manifest, and a failed requested rescan invalidates
+the earlier manifest. Manifest and GitHub summary destinations must be separate
+from active configuration and exception inputs.
+
+Verification checks artifact scope, review kind and status, counts, unique IDs,
+file bindings and expiry before and after checking the inventory. It uses the
+captured policy snapshot; it does not reload a later policy file. Changing or
+revoking policy requires a fresh scan and replacement manifest. Earlier manifest
+schemas require a rescan. Verification reports how many reviewed occurrences remain.
+
+Manifests are unsigned records from a trusted workflow. They do not authenticate
+reviewers or prove that deliberately edited records came from a scan. Verify
+immediately before upload and prevent concurrent input changes: the command cannot
+guarantee the bytes or review validity at a later upload time.

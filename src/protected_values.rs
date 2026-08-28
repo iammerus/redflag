@@ -82,6 +82,12 @@ impl ProtectedValues {
         &self.names
     }
 
+    pub fn contains(&self, text: &str) -> bool {
+        self.matcher
+            .as_ref()
+            .is_some_and(|matcher| matcher.is_match(text.as_bytes()))
+    }
+
     pub fn scan<H: FindingHandler>(
         &self,
         path: &Path,

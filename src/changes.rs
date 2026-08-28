@@ -245,11 +245,10 @@ pub(crate) fn run(mut args: ChangeArgs) -> Result<u8, RedflagError> {
     }
     engine.finish(&mut occurrences)?;
     coverage.occurrence_comparison = Some(occurrences.emit_introduced(&mut handler)?);
-    handler.finish_report(
-        ReportContext::source(coverage.repository.clone()),
-        &coverage,
-        exception_policy,
-    )
+    let mut context = ReportContext::source(coverage.repository.clone());
+    context.protect_output(args.exceptions.path());
+    context.protect_output(args.config.as_deref());
+    handler.finish_report(context, &coverage, exception_policy)
 }
 
 fn resolve(repo: &Repository, revision: &str) -> Result<Oid, RedflagError> {

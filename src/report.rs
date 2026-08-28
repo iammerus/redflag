@@ -3,7 +3,10 @@ use crate::{
     artifacts::{digest, file_path, ArtifactCoverage},
     config::{ScanLimits, Severity},
     error::RedflagError,
-    exceptions::{Audit as ExceptionAudit, Policy as ExceptionPolicy, Review, ReviewStatus},
+    exceptions::{
+        AcceptedArtifact, ArtifactApproval, Audit as ExceptionAudit, Policy as ExceptionPolicy,
+        Review, ReviewStatus,
+    },
     scanner::{Finding, FindingHandler, FindingSpan},
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +47,17 @@ pub(crate) struct ReportHandler {
     count: usize,
     bytes: usize,
     max_findings: usize,
+}
+
+pub(crate) struct PreparedReport {
+    format: ReportFormat,
+    github_summary: Option<PathBuf>,
+    reader: BufReader<File>,
+    count: usize,
+    total: usize,
+    context: ReportContext,
+    groups: Vec<PreparedGroup>,
+    exception_audit: ExceptionAudit,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -245,16 +259,20 @@ impl ReportHandler {
         })
     }
 
-    pub fn findings_count(&self) -> usize {
-        self.count
-    }
-
     pub fn finish_report(
-        mut self,
+        self,
         context: ReportContext,
         coverage: &impl ReportCoverage,
         policy: ExceptionPolicy,
     ) -> Result<u8, RedflagError> {
+        self.prepare_report(context, policy)?.write(coverage)
+    }
+
+    pub fn prepare_report(
+        mut self,
+        context: ReportContext,
+        policy: ExceptionPolicy,
+    ) -> Result<PreparedReport, RedflagError> {
         policy.validate_mode(context.mode)?;
         self.spool.flush()?;
         self.spool.get_mut().rewind()?;
@@ -263,6 +281,61 @@ impl ReportHandler {
         let mut groups = prepare(&mut reader, &context)?;
         let exception_audit = apply_reviews(&mut groups, policy)?;
         let total = groups.iter().map(|g| g.occurrences.len()).sum::<usize>();
+        Ok(PreparedReport {
+            format: self.format,
+            github_summary: self.github_summary,
+            reader,
+            count: self.count,
+            total,
+            context,
+            groups,
+            exception_audit,
+        })
+    }
+}
+
+impl PreparedReport {
+    pub fn exit_code(&self) -> u8 {
+        u8::from(self.total > self.exception_audit.accepted_occurrences)
+    }
+
+    pub fn artifact_approval(&self) -> Result<(usize, ArtifactApproval), RedflagError> {
+        if self.context.mode != "artifacts" || self.exit_code() != 0 {
+            return Err(invalid("Only a complete artifact report without blockers can authorize a publication manifest"));
+        }
+        let mut occurrences = Vec::new();
+        for group in &self.groups {
+            for occurrence in &group.occurrences {
+                occurrences.push(AcceptedArtifact {
+                    occurrence_id: occurrence.id.clone(),
+                    target: occurrence
+                        .location
+                        .target
+                        .ok_or_else(|| invalid("Reviewed artifact occurrence has no target"))?,
+                    path: PathBuf::from(&occurrence.location.path),
+                    file_sha256: occurrence.location.version.clone(),
+                    review: occurrence
+                        .review
+                        .clone()
+                        .ok_or_else(|| invalid("Publication occurrence has no accepted review"))?,
+                });
+            }
+        }
+        Ok((
+            self.count,
+            ArtifactApproval {
+                policy: self.exception_audit.clone(),
+                occurrences,
+            },
+        ))
+    }
+
+    pub fn write(self, coverage: &impl ReportCoverage) -> Result<u8, RedflagError> {
+        let mut reader = self.reader;
+        let context = self.context;
+        let groups = self.groups;
+        let exception_audit = self.exception_audit;
+        let total = self.total;
         let blocking = total - exception_audit.accepted_occurrences;
         let exit = u8::from(blocking > 0);
         if let Some(path) = self.github_summary {
@@ -407,6 +480,8 @@ impl ReportHandler {
                                     writer,
                                     "    This exception has expired; the occurrence blocks."
                                 )?;
+                            } else if review.status == ReviewStatus::RejectedPrivateValue {
+                                writeln!(writer, "    This exception cannot authorize a declared private value; the occurrence blocks.")?;
                             }
                         }
                     }
@@ -631,12 +706,19 @@ fn apply_reviews(
     let mut seen = BTreeSet::new();
     let mut matched = BTreeSet::new();
     let mut accepted = 0;
+    let mut rejected_private = 0;
     for group in groups {
         for occurrence in &mut group.occurrences {
             if !seen.insert(occurrence.id.clone()) {
                 return Err(invalid("Multiple logical candidates share an occurrence identity; review ambiguous detector evidence"));
             }
             occurrence.review = policy.review(&occurrence.id, now);
+            if !group.private_env.is_empty() {
+                if let Some(review) = &mut occurrence.review {
+                    review.status = ReviewStatus::RejectedPrivateValue;
+                    rejected_private += 1;
+                }
+            }
             if occurrence.review.is_some() {
                 matched.insert(occurrence.id.clone());
             }
@@ -645,7 +727,7 @@ fn apply_reviews(
             }
         }
     }
-    Ok(policy.audit(now, &matched, accepted))
+    Ok(policy.audit(now, &matched, accepted, rejected_private))
 }
 
 fn normalized_path(path: &Path) -> Result<String, RedflagError> {

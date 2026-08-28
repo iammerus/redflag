@@ -108,10 +108,11 @@ pub(super) fn render(
                         r.reason,
                         r.reviewed_by,
                         r.expires_at,
-                        if occurrence.accepted() {
-                            ""
-                        } else {
-                            "; EXPIRED"
+                        match r.status {
+                            super::ReviewStatus::Accepted => "",
+                            super::ReviewStatus::Expired => "; EXPIRED",
+                            super::ReviewStatus::RejectedPrivateValue =>
+                                "; REJECTED: declared private values cannot be exempted",
                         }
                     ),
                     768
@@ -209,7 +210,7 @@ fn append_summary(path: &Path, text: &str, context: &ReportContext) -> Result<()
         };
         if resolved.starts_with(protected) {
             return Err(invalid(
-                "GitHub summary must be outside publication inputs and separate from the manifest",
+                "GitHub summary must be separate from publication inputs, manifests and policy files",
             ));
         }
     }

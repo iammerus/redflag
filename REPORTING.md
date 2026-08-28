@@ -16,6 +16,10 @@ including accepted evidence. Every occurrence has `status` (`blocking` or
 reviewer and expiry. Groups also include `blocking_occurrence_count`. See
 [EXCEPTIONS.md](EXCEPTIONS.md) for trust selection and expiry behavior.
 
+Matched review status is `accepted`, `expired` or `rejected_private_value`.
+Declared private values cannot be accepted in artifact mode. Artifact false-positive
+reviews require an explicit artifact policy; source policy never authorizes them.
+
 A logical finding groups equal captured values across locations. Each group
 contains its ID, title, maximum severity, rule IDs and severities, declared private
 variable names, remediation and occurrences. Multipart credentials group only
@@ -87,11 +91,11 @@ Input records spool into a private anonymous file capped at 64 MiB; records are
 bounded by `limits.max_findings` (100,000 by default). Grouping keeps location/ID
 indexes in memory and reads each occurrence's evidence from the spool. It does not
 load every complete finding into memory. Exceeding either budget fails explicitly.
-No clean artifact manifest survives a failed requested rescan or report finalization.
+No approved artifact manifest survives a failed requested rescan or report finalization.
 
 Legacy `scan --format json` continues to emit its original array. `verify-artifacts`
 and `show-config` retain their own version 1 envelopes; publication manifests retain
-their independent version 2 contract.
+their independent version 3 contract.
 
 ## GitHub annotations and job summaries
 
@@ -148,9 +152,9 @@ Summary text escapes Markdown/HTML metacharacters, workflow properties escape
 command delimiters, and terminal error messages escape control characters.
 No credential captures or private grouping digests enter annotations or summaries.
 Summary destinations must be regular files outside publication inputs and distinct
-from the requested manifest. Symlinks and special files are rejected; Unix also
+from the requested manifest and active configuration/exception files. Symlinks and special files are rejected; Unix also
 rejects shared hard links. Scan failures leave prior summary content unchanged.
-Summary/output errors fail the step and invalidate a requested clean manifest.
+Summary/output errors fail the step and invalidate a requested approved manifest.
 
 The CLI formatter is covered by offline fixtures, including token-free source
 events and historical locations. Verified prebuilt Action packaging and hosted
