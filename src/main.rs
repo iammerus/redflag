@@ -92,7 +92,7 @@ enum Commands {
         no_config: bool,
 
         #[arg(short, long, value_enum, default_value = "text")]
-        format: output::OutputFormat,
+        format: output::ScanFormat,
 
         /// Include matched secret values in output
         #[arg(long)]
@@ -303,13 +303,13 @@ fn run(cli: Cli) -> Result<u8, RedflagError> {
 fn run_scan(
     path: String,
     config_path: Option<PathBuf>,
-    format: output::OutputFormat,
+    format: output::ScanFormat,
     show_secrets: bool,
     no_progress: bool,
     git_history: bool,
     git_options: GitScanOptions,
 ) -> Result<u8, RedflagError> {
-    let mut config = Config::load(config_path)?;
+    let mut config = Config::load(config_path.clone())?;
 
     // Override git config with CLI options if provided
     if git_history {
@@ -332,7 +332,8 @@ fn run_scan(
         .then(|| git_scanner::HistoryScan::prepare(Path::new(&path), &config.git))
         .transpose()?;
 
-    let mut handler = OutputHandler::new(format, !no_progress);
+    let target = std::fs::canonicalize(&path)?;
+    let mut handler = OutputHandler::new(format.output(), !no_progress);
 
     let working_result = scanner.scan_with_handler(&path, &mut handler);
     if working_result.is_err() {
@@ -340,7 +341,7 @@ fn run_scan(
     }
     let working_stats = working_result?;
 
-    let history_stats = if let Some(history) = history {
+    let history_stats = if let Some(history) = &history {
         let history_result = history.scan(&scanner, &mut handler);
         if history_result.is_err() {
             handler.clear_progress();
@@ -350,7 +351,47 @@ fn run_scan(
         None
     };
 
-    handler.finish(&working_stats, history_stats.as_ref())?;
+    if format == output::ScanFormat::JsonReport {
+        #[derive(serde::Serialize)]
+        struct Coverage<'a> {
+            target: PathBuf,
+            engine: &'static str,
+            config_path: Option<PathBuf>,
+            config_sha256: String,
+            extensions: &'a [String],
+            exclusions: &'a [config::ExclusionRule],
+            inline_suppressions: &'static str,
+            working_tree: &'a scanner::ScanStats,
+            history: Option<&'a scanner::ScanStats>,
+            history_scope: Option<&'a git_scanner::HistoryScope>,
+            max_file_bytes: u64,
+            max_line_bytes: usize,
+            max_files_per_phase: usize,
+        }
+        handler.finish_report(
+            "scan",
+            &Coverage {
+                target,
+                engine: "redflag-native",
+                config_path,
+                config_sha256: artifacts::digest(&serde_json::to_vec(&config)?),
+                extensions: &config.extensions,
+                exclusions: &config.exclusions,
+                inline_suppressions: "honor source comment directives",
+                working_tree: &working_stats,
+                history: history_stats.as_ref(),
+                history_scope: history.as_ref().map(git_scanner::HistoryScan::scope),
+                max_file_bytes: config.limits.max_file_bytes,
+                max_line_bytes: config.limits.max_line_bytes,
+                max_files_per_phase: config.limits.max_files,
+            },
+        )?;
+    } else {
+        handler.finish(&working_stats, history_stats.as_ref())?;
+        if let Some(history) = &history {
+            handler.history_scope(history.scope())?;
+        }
+    }
     Ok(u8::from(handler.findings_count() > 0))
 }
 

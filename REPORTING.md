@@ -93,9 +93,42 @@ indexes in memory and reads each occurrence's evidence from the spool. It does n
 load every complete finding into memory. Exceeding either budget fails explicitly.
 No approved artifact manifest survives a failed requested rescan or report finalization.
 
-Legacy `scan --format json` continues to emit its original array. `verify-artifacts`
-and `show-config` retain their own version 1 envelopes; publication manifests retain
-their independent version 3 contract.
+Legacy `scan --format json` remains the original JSON array. Its opt-in
+`--format json-report` uses the separate version 1 contract described below.
+`verify-artifacts` and `show-config` retain their own version 1 envelopes;
+publication manifests retain their independent version 3 contract.
+
+## Legacy scan coverage
+
+`scan --format json-report` wraps the original flat findings in a version 1
+envelope with `mode: "scan"`, `complete`, `scanner_version`, `findings_count` and
+`coverage`. It preserves native rules, source selection, redaction and explicit
+`--show-secrets` behavior. It does not apply modern occurrence reviews or grouping.
+Both JSON formats leave stdout empty when scanning fails before final rendering.
+
+Coverage records the canonical target, native engine, configuration path and
+effective configuration SHA-256 (including CLI Git overrides), ordered exclusions,
+extensions, comment-suppression policy and enforced file/line/count limits. The
+`working_tree` and optional `history` statistics retain separate file and finding
+counts; `history` and `history_scope` are null when history inspection is disabled.
+The native source selector also recognizes its documented configuration filenames;
+an explicitly selected regular file bypasses extension filtering.
+
+`history_scope` records the repository, requested revision-to-commit `tips`, total
+`reachable_commits`, exact `selected_commits`, `omitted_by_date`, `max_commits` and
+the first-parent added-line comparison. Annotated tags resolve to their commit.
+`since` and `until` are inclusive UTC Unix timestamps or null for an unbounded
+endpoint. Selected commit IDs follow traversal order. Overlapping tips visit a
+reachable commit once. Successful reports have `shallow: false` and
+`truncated: false`; missing objects, shallow boundaries and traversal limits fail
+instead of emitting a complete report.
+
+`complete` describes the explicitly selected source scope. Date filters can select
+zero commits, and exclusions/extension selection can omit files. Text summaries
+show selected/reachable counts, omitted dates and resolved tips even without
+interactive progress. This coverage is not an artifact inventory or publication
+manifest. Use `changes` for introduced-commit policy and merge handling, and
+`artifacts` for publication inputs.
 
 ## GitHub annotations and job summaries
 

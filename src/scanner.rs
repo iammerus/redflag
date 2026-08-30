@@ -59,7 +59,7 @@ pub(crate) struct CommitMetadata {
     pub date: String,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 pub(crate) struct ScanStats {
     pub files: usize,
     pub findings: usize,

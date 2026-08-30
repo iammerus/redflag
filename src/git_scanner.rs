@@ -8,11 +8,33 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use git2::{Commit, DiffOptions, Oid, Patch, Repository, Revwalk, Sort};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryScope {
+    repository: PathBuf,
+    pub tips: Vec<HistoryTip>,
+    pub reachable_commits: usize,
+    pub selected_commits: Vec<String>,
+    pub omitted_by_date: usize,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    max_commits: usize,
+    shallow: bool,
+    truncated: bool,
+    pub comparison: &'static str,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryTip {
+    pub revision: String,
+    pub commit: String,
+}
 
 pub(crate) struct HistoryScan {
     repo: Repository,
     commits: Vec<Oid>,
+    scope: HistoryScope,
 }
 
 impl HistoryScan {
@@ -26,9 +48,10 @@ impl HistoryScan {
             ));
         }
         let mut revwalk = repo.revwalk()?;
-        push_revisions(&repo, &mut revwalk, config)?;
+        let tips = push_revisions(&repo, &mut revwalk, config)?;
         revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
         let mut commits = Vec::new();
+        let mut reachable_commits = 0;
         for (index, oid) in revwalk.enumerate() {
             let oid = oid?;
             if index >= config.max_depth {
@@ -37,12 +60,34 @@ impl HistoryScan {
                     config.max_depth
                 )));
             }
+            reachable_commits += 1;
             let commit = repo.find_commit(oid)?;
             if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
                 commits.push(oid);
             }
         }
-        Ok(Self { repo, commits })
+        let scope = HistoryScope {
+            repository: std::fs::canonicalize(repo.workdir().unwrap_or(repo.path()))?,
+            tips,
+            reachable_commits,
+            selected_commits: commits.iter().map(ToString::to_string).collect(),
+            omitted_by_date: reachable_commits - commits.len(),
+            since: config.since_timestamp,
+            until: config.until_timestamp,
+            max_commits: config.max_depth,
+            shallow: false,
+            truncated: false,
+            comparison: "added lines relative to first parent; root commits relative to empty tree",
+        };
+        Ok(Self {
+            repo,
+            commits,
+            scope,
+        })
+    }
+
+    pub(crate) fn scope(&self) -> &HistoryScope {
+        &self.scope
     }
 
     pub(crate) fn scan<H: FindingHandler>(
@@ -109,21 +154,31 @@ fn push_revisions<'repo>(
     repo: &'repo Repository,
     revwalk: &mut Revwalk<'repo>,
     config: &GitConfig,
-) -> Result<(), RedflagError> {
+) -> Result<Vec<HistoryTip>, RedflagError> {
     let revisions: Vec<&str> = if config.branches.is_empty() {
         vec!["HEAD"]
     } else {
         config.branches.iter().map(String::as_str).collect()
     };
+    let mut tips = Vec::new();
     for revision in revisions {
         let object = repo.revparse_single(revision).map_err(|error| {
             RedflagError::Config(format!(
                 "Git revision '{revision}' cannot be resolved: {error}"
             ))
         })?;
-        revwalk.push(object.id())?;
+        let commit = object.peel_to_commit().map_err(|error| {
+            RedflagError::Config(format!(
+                "Git revision '{revision}' is not a commit: {error}"
+            ))
+        })?;
+        revwalk.push(commit.id())?;
+        tips.push(HistoryTip {
+            revision: revision.into(),
+            commit: commit.id().to_string(),
+        });
     }
-    Ok(())
+    Ok(tips)
 }
 
 fn process_commit<H: FindingHandler>(

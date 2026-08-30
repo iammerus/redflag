@@ -1,6 +1,7 @@
 use crate::{
     config::Severity,
     error::RedflagError,
+    git_scanner::HistoryScope,
     scanner::{Finding, FindingHandler, ScanProgress, ScanStats},
 };
 use std::{
@@ -18,6 +19,23 @@ const PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq)]
+pub(crate) enum ScanFormat {
+    Text,
+    Json,
+    /// Versioned JSON with selected history scope and effective policy identity
+    JsonReport,
+}
+
+impl ScanFormat {
+    pub fn output(self) -> OutputFormat {
+        match self {
+            Self::Text => OutputFormat::Text,
+            Self::Json | Self::JsonReport => OutputFormat::Json,
+        }
+    }
 }
 
 pub struct OutputHandler {
@@ -265,6 +283,35 @@ impl OutputHandler {
 
     pub fn findings_count(&self) -> usize {
         self.findings_count
+    }
+
+    pub(crate) fn history_scope(&mut self, scope: &HistoryScope) -> Result<(), RedflagError> {
+        if matches!(self.format, OutputFormat::Text) {
+            writeln!(self.writer, "History scope: {} of {} reachable commits selected; {} omitted by date; complete, not truncated.", scope.selected_commits.len(), scope.reachable_commits, scope.omitted_by_date)?;
+            for tip in &scope.tips {
+                writeln!(
+                    self.writer,
+                    "  Revision {} -> {}",
+                    tip.revision.escape_debug(),
+                    tip.commit
+                )?;
+            }
+            let date = |timestamp: Option<i64>| {
+                timestamp
+                    .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_else(|| "unbounded".into())
+            };
+            writeln!(
+                self.writer,
+                "  Commit time (UTC, inclusive): {} through {}",
+                date(scope.since),
+                date(scope.until)
+            )?;
+            writeln!(self.writer, "  Comparison: {}", scope.comparison)?;
+            self.writer.flush()?;
+        }
+        Ok(())
     }
 
     /// Versioned reports retain the disk spool used by the legacy source array.

@@ -134,12 +134,12 @@ redflag scan [PATH]
 | --- | --- |
 | `-c, --config <FILE>` | Load a TOML configuration |
 | `--no-config` | Use defaults without automatic policy discovery |
-| `-f, --format <text\|json>` | Select text or JSON output |
+| `-f, --format <text\|json\|json-report>` | Select text, the legacy JSON array, or versioned JSON with coverage |
 | `--show-secrets` | Include raw matched values |
 | `--no-progress` | Disable interactive progress output |
 | `--git-history` | Also scan reachable Git history |
 | `--git-branches <REVISIONS>` | Scan comma-separated branches, tags, or revisions |
-| `--git-max-depth <COUNT>` | Limit reachable commits inspected |
+| `--git-max-depth <COUNT>` | Fail if reachable history exceeds this commit limit |
 | `--git-since <YYYY-MM-DD>` | Ignore older commits |
 | `--git-until <YYYY-MM-DD>` | Ignore newer commits |
 
@@ -149,6 +149,21 @@ explicit revision must resolve or the scan exits with code `2`.
 History scans require a complete checkout. Shallow repositories and histories
 that exceed `--git-max-depth` fail with exit code `2`; they cannot produce a
 clean partial result. Fetch full history and increase the limit when needed.
+
+Use `scan --format json-report` for a version 1 envelope containing the native
+findings, effective policy digest, working-tree statistics and selected history
+scope. The scope records each requested revision and its resolved commit, every
+selected commit ID, date-filter omissions and the traversal limit. Text summaries
+also show the tips, dates and selected/reachable counts. `--format json` retains
+the existing findings-only array. See [REPORTING.md](REPORTING.md).
+
+Dates select commit timestamps inclusively in UTC, from midnight on `--git-since`
+through 23:59:59 on `--git-until`. The commit limit applies to all history reachable
+from the selected tips before date filtering. A complete filtered scan may omit
+older or newer history, and its report identifies that omission. Legacy history
+compares each commit with its first parent and inspects added lines using source
+extensions, exclusions and comment suppressions. For the trusted policy and merge
+semantics of a CI source gate, use [the `changes` command](CHANGES.md).
 
 An explicitly named regular file is scanned regardless of its extension.
 Directory scans use the configured extensions and recognise `.env` and names

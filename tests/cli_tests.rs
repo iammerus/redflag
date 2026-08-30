@@ -390,20 +390,22 @@ fn history_defaults_to_head_on_trunk() {
 #[test]
 fn history_limits_fail_before_emitting_results() {
     let dir = trunk_repo_with_deleted_secret();
-    for (limit, expected) in [(1, 2), (2, 1), (3, 1)] {
-        let output = redflag_with_args(&[
-            "scan",
-            dir.path().to_str().unwrap(),
-            "--git-history",
-            "--git-max-depth",
-            &limit.to_string(),
-            "--format",
-            "json",
-        ]);
-        assert_eq!(output.status.code(), Some(expected));
-        if expected == 2 {
-            assert!(output.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("exceeds"));
+    for format in ["json", "json-report"] {
+        for (limit, expected) in [(1, 2), (2, 1), (3, 1)] {
+            let output = redflag_with_args(&[
+                "scan",
+                dir.path().to_str().unwrap(),
+                "--git-history",
+                "--git-max-depth",
+                &limit.to_string(),
+                "--format",
+                format,
+            ]);
+            assert_eq!(output.status.code(), Some(expected));
+            if expected == 2 {
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8_lossy(&output.stderr).contains("exceeds"));
+            }
         }
     }
 }
@@ -417,16 +419,224 @@ fn shallow_history_is_an_operational_failure() {
     // to remain locally (for example, after a partial fetch).
     fs::write(repo.path().join("shallow"), format!("{head}\n")).unwrap();
     drop(repo);
+    for format in ["json", "json-report"] {
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--format",
+            format,
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("shallow"));
+    }
+}
+
+#[test]
+fn versioned_legacy_report_retains_exact_scope_and_array_compatibility() {
+    let dir = trunk_repo_with_deleted_secret();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    let first = head.parent(0).unwrap();
+    let signature = Signature::now("Test User", "test@example.com").unwrap();
+    repo.tag(
+        "audit",
+        first.as_object(),
+        &signature,
+        "Reviewed tip",
+        false,
+    )
+    .unwrap();
+    let run = |format| {
+        redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--no-config",
+            "--git-branches",
+            "HEAD,audit",
+            "--format",
+            format,
+            "--no-progress",
+        ])
+    };
+    let result = run("json-report");
+    assert_eq!(result.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["mode"], "scan");
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["coverage"]["engine"], "redflag-native");
+    let scope = &report["coverage"]["history_scope"];
+    assert_eq!(scope["reachable_commits"], 2);
+    assert_eq!(scope["omitted_by_date"], 0);
+    assert_eq!(scope["shallow"], false);
+    assert_eq!(scope["truncated"], false);
+    assert_eq!(
+        scope["tips"],
+        serde_json::json!([
+            {"revision":"HEAD", "commit":head.id().to_string()},
+            {"revision":"audit", "commit":first.id().to_string()},
+        ])
+    );
+    assert_eq!(
+        scope["selected_commits"],
+        serde_json::json!([head.id().to_string(), first.id().to_string()])
+    );
+    assert_eq!(report["coverage"]["history"]["commits"], 2);
+    assert_eq!(report["coverage"]["working_tree"]["findings"], 0);
+    let legacy: serde_json::Value = serde_json::from_slice(&run("json").stdout).unwrap();
+    assert_eq!(report["findings"], legacy);
+    assert!(!String::from_utf8_lossy(&result.stdout).contains(&synthetic_secret()));
+    let text = String::from_utf8(run("text").stdout).unwrap();
+    assert!(text.contains("2 of 2 reachable commits selected; 0 omitted by date"));
+    assert!(text.contains(&format!("Revision audit -> {}", first.id())));
+    assert!(text.contains("relative to first parent"));
+}
+
+#[test]
+fn history_report_identifies_inclusive_date_selection_and_empty_scopes() {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let mut ids = Vec::new();
+    for (index, timestamp) in [
+        "2025-01-01T23:59:59Z",
+        "2025-01-02T00:00:00Z",
+        "2025-01-02T23:59:59Z",
+        "2025-01-03T00:00:00Z",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let seconds = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .timestamp();
+        let signature = Signature::new(
+            "Test User",
+            "test@example.com",
+            &git2::Time::new(seconds, 0),
+        )
+        .unwrap();
+        let file = dir.path().join("config.env");
+        if index == 1 {
+            write_secret(&file);
+        } else {
+            fs::write(&file, "PUBLIC_SETTING=enabled\n").unwrap();
+        }
+        let mut git_index = repo.index().unwrap();
+        git_index.add_path(Path::new("config.env")).unwrap();
+        let tree_id = git_index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parents: Vec<_> = ids
+            .last()
+            .map(|id| repo.find_commit(*id).unwrap())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<_> = parents.iter().collect();
+        ids.push(
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Scope fixture",
+                &tree,
+                &parent_refs,
+            )
+            .unwrap(),
+        );
+    }
+    for (day, expected, selected) in [
+        (
+            "2025-01-02",
+            1,
+            vec![ids[2].to_string(), ids[1].to_string()],
+        ),
+        ("2025-01-04", 0, vec![]),
+    ] {
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--no-config",
+            "--git-history",
+            "--git-since",
+            day,
+            "--git-until",
+            day,
+            "--format",
+            "json-report",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let scope = &report["coverage"]["history_scope"];
+        assert_eq!(scope["reachable_commits"], 4);
+        assert_eq!(scope["selected_commits"], serde_json::json!(selected));
+        assert_eq!(scope["omitted_by_date"], 4 - selected.len());
+        assert_eq!(
+            scope["until"].as_i64().unwrap() - scope["since"].as_i64().unwrap(),
+            86399
+        );
+        assert_eq!(report["complete"], true);
+    }
+    // Date filters do not turn the traversal safety limit into silent truncation.
+    let incomplete = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--no-config",
+        "--git-history",
+        "--git-since",
+        "2099-01-01",
+        "--git-max-depth",
+        "1",
+        "--format",
+        "json-report",
+    ]);
+    assert_eq!(incomplete.status.code(), Some(2));
+    assert!(incomplete.stdout.is_empty());
+}
+
+#[test]
+fn working_tree_report_records_policy_without_inventing_history_coverage() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("secret.rs"));
     let output = redflag_with_args(&[
         "scan",
         dir.path().to_str().unwrap(),
-        "--git-history",
+        "--no-config",
+        "--format",
+        "json-report",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let config = redflag_with_args(&[
+        "show-config",
+        dir.path().to_str().unwrap(),
+        "--no-config",
         "--format",
         "json",
     ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("shallow"));
+    let config: serde_json::Value = serde_json::from_slice(&config.stdout).unwrap();
+    assert_eq!(report["coverage"]["config_sha256"], config["sha256"]);
+    assert_eq!(
+        report["coverage"]["exclusions"],
+        config["effective"]["exclusions"]
+    );
+    assert_eq!(
+        report["coverage"]["extensions"],
+        config["effective"]["extensions"]
+    );
+    assert_eq!(
+        report["coverage"]["target"],
+        fs::canonicalize(dir.path()).unwrap().to_str().unwrap()
+    );
+    assert_eq!(report["coverage"]["working_tree"]["files"], 1);
+    assert!(report["coverage"]["history"].is_null());
+    assert!(report["coverage"]["history_scope"].is_null());
 }
 
 #[test]
