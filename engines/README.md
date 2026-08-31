@@ -37,12 +37,45 @@ remain native, and the existing native `.netrc` check is retained because Better
 1.8.1 misses that format in the preserved research corpus. Native entropy and the
 remaining built-in provider catalogue do not run alongside Betterleaks.
 
+`normalization.json` preserves the code-file class used by the pinned engine's
+password and username filters. Recognized code extensions (including one
+`.example`, `.sample` or `.template` suffix) stage under neutral `.js` names;
+other inputs stage under neutral `.txt` names. Original names still appear in
+reports. This retains source-expression filtering without restoring upstream
+file-selection skips. Unquoted configuration scalars and quoted source passwords
+remain candidates. The extension list mirrors the [pinned upstream code-file
+filter](https://github.com/betterleaks/betterleaks/blob/5eab48332cc48565864514e3bc6de89df091a7c4/config/betterleaks.toml).
+
+The generic-password filter also requires a credential-key delimiter or a
+lower-to-upper camel-case edge. `notpassword` is excluded while `DATABASE_PASSWORD`
+and `databasePassword` retain detection. Upstream filter overrides replace
+inheritance, so `betterleaks.toml` carries the pinned upstream password filter plus
+two final conditions; updates must review that copy with the engine pin. One
+condition recognizes an unquoted identifier inside a complete function-call object
+argument, including examples in `.txt` files. Both enclosing call/object delimiters
+are required. A YAML password field containing an unquoted word, or a quoted
+password in that call, still reports a candidate.
+
+Only the exact generic-password captures `YOUR_PASSWORD_HERE` and
+`your_password_here` are classified as instructional placeholders by Redflag's
+adapter. Prefixes, suffixes and other case variants remain candidates. Provider
+rules and declared-private-value matching are independent; declaring either marker
+as private still blocks its publication. This does not establish that a marker
+used as an actual password is safe.
+
+Reports and manifests include `adapter_sha256`: SHA-256 of the exact `report.tmpl`
+bytes, one NUL byte, and the exact `normalization.json` bytes. The detector's
+`config_sha256` separately identifies its TOML policy. Verification requires both
+current identities; earlier Betterleaks manifests without the adapter identity
+require a rescan. Native engine metadata uses a null adapter digest.
+
 Engine upgrades require reviewed checksum pins and the coverage, completeness
 and redaction regression tests. Do not change pins to accept an arbitrary binary.
 
 Real-engine integration tests cover hidden/unknown/binary inputs, untrusted
 environment/config isolation, overlap and Unicode locations, provider boundaries,
-redaction, native custom rules and version 2 manifests. Run them with:
+redaction, native custom rules, source references, literal/password key boundaries,
+private placeholder values and version 3 manifests. Run them with:
 
 ```sh
 python3 scripts/install_engine.py --directory target/debug/engines

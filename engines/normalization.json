@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "code_extensions": [
+    "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "cs", "dart", "ex", "exs",
+    "fs", "fsx", "go", "gemspec", "groovy", "java", "js", "jsx", "mjs", "cjs",
+    "kt", "kts", "lua", "m", "mm", "php", "pl", "pm", "py", "pyw", "r",
+    "rake", "rb", "rs", "scala", "sql", "swift", "tf", "tfvars", "ts", "tsx",
+    "vb", "vue"
+  ],
+  "example_suffixes": ["example", "sample", "template"],
+  "generic_password_placeholders": ["YOUR_PASSWORD_HERE", "your_password_here"]
+}

@@ -88,6 +88,188 @@ fn missing_engine_does_not_fall_back_to_native() {
 
 #[test]
 #[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn engine_preserves_code_context_and_limits_placeholder_policy_to_exact_values() {
+    let dir = tempdir().unwrap();
+    let code = dir.path().join("code");
+    fs::create_dir(&code).unwrap();
+    for filename in ["app.js", "app.TS", "app.rs", "app.py", "app.js.example"] {
+        fs::write(
+            code.join(filename),
+            "setCredentials({password: password, username});\nconst password = getPassword;\nconst notpassword = \"not-a-credential\";\nconst PASSWORD_FIELD = \"public field label\";\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        code.join("object-reference.txt"),
+        "setCredentials({password: password, username});\n",
+    )
+    .unwrap();
+    let clean = report(scan(&code, &[]), 0);
+    assert_eq!(clean["findings_count"], 0);
+    let adapter = clean["coverage"]["engine"]["adapter_sha256"]
+        .as_str()
+        .unwrap();
+    assert_eq!(adapter.len(), 64);
+
+    let literals = dir.path().join("literals");
+    fs::create_dir(&literals).unwrap();
+    for (filename, text) in [
+        ("quoted.js", "const password = \"getPassword\";\n"),
+        ("unquoted.env", "password=getPassword\n"),
+        ("unknown.data", "password=getPassword\n"),
+        ("weak.js", "const password = \"admin123\";\n"),
+        ("marker-suffix.env", "password=YOUR_PASSWORD_HERE!\n"),
+        ("marker-prefix.env", "password=X_YOUR_PASSWORD_HERE\n"),
+        ("other-case.env", "password=Your_Password_Here\n"),
+        ("camel.js", "const databasePassword = \"admin123\";\n"),
+        ("delimited.env", "DATABASE_PASSWORD=admin123\n"),
+        ("literal-scalar.yaml", "password: password\n"),
+        (
+            "quoted-object.txt",
+            "setCredentials({password: \"password\", username});\n",
+        ),
+    ] {
+        fs::write(literals.join(filename), text).unwrap();
+    }
+    let findings = report(scan(&literals, &[]), 1);
+    let files: std::collections::BTreeSet<_> = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            Path::new(finding["file"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(files.len(), 11, "{files:?}");
+    assert_eq!(findings["coverage"]["engine"]["adapter_sha256"], adapter);
+
+    let placeholders = dir.path().join("placeholders");
+    fs::create_dir(&placeholders).unwrap();
+    for (index, value) in ["YOUR_PASSWORD_HERE", "your_password_here"]
+        .iter()
+        .enumerate()
+    {
+        fs::write(
+            placeholders.join(format!("{index}.env")),
+            format!("password=\"{value}\"\n"),
+        )
+        .unwrap();
+    }
+    let manifest = dir.path().join("manifest.json");
+    report(
+        scan(&placeholders, &["--manifest", manifest.to_str().unwrap()]),
+        0,
+    );
+    let verified = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("verify-artifacts")
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert_eq!(verified.status.code(), Some(0));
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    for adapter in [
+        serde_json::Value::Null,
+        serde_json::Value::String("0".repeat(64)),
+    ] {
+        let mut stale = saved.clone();
+        stale["detector"]["adapter_sha256"] = adapter;
+        fs::write(&manifest, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let rejected = Command::new(env!("CARGO_BIN_EXE_redflag"))
+            .arg("verify-artifacts")
+            .arg(&manifest)
+            .args(["--format", "json"])
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(2));
+        assert!(rejected.stdout.is_empty());
+    }
+    fs::write(&manifest, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let private = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(&placeholders)
+        .args([
+            "--no-config",
+            "--format",
+            "json",
+            "--private-env",
+            "RF_PRIVATE_MARKER",
+            "--manifest",
+        ])
+        .arg(&manifest)
+        .arg("--betterleaks-path")
+        .arg(engine_path())
+        .env("RF_PRIVATE_MARKER", "YOUR_PASSWORD_HERE")
+        .output()
+        .unwrap();
+    let private = report(private, 1);
+    assert_eq!(private["blocking_occurrences_count"], 1);
+    assert!(!manifest.exists());
+    assert!(!private.to_string().contains("YOUR_PASSWORD_HERE"));
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
+fn source_engine_context_keeps_literal_password_additions_blocking() {
+    let dir = tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    let signature = git2::Signature::now("Fixture", "fixture@example.invalid").unwrap();
+    let commit = |text: &str| {
+        fs::write(dir.path().join("app.js"), text).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("app.js")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parents: Vec<_> = repo
+            .head()
+            .ok()
+            .map(|head| head.peel_to_commit().unwrap())
+            .into_iter()
+            .collect();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Fixture",
+            &tree,
+            &parents.iter().collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    let base = commit("// clean application\n");
+    let reference = commit("setCredentials({password: password, username});\n");
+    let scan = |base: git2::Oid, head: git2::Oid| {
+        Command::new(env!("CARGO_BIN_EXE_redflag"))
+            .arg("changes")
+            .arg(dir.path())
+            .args([
+                "--no-config",
+                "--format",
+                "json",
+                "--base",
+                &base.to_string(),
+                "--head",
+                &head.to_string(),
+                "--betterleaks-path",
+            ])
+            .arg(engine_path())
+            .output()
+            .unwrap()
+    };
+    report(scan(base, reference), 0);
+    let literal = commit("setCredentials({password: \"getPassword\", username});\n");
+    assert_eq!(
+        report(scan(reference, literal), 1)["blocking_occurrences_count"],
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires the checksum-verified engine; CI installs it and includes ignored tests"]
 fn pinned_engine_inspects_all_selected_types_and_ignores_untrusted_policy() {
     let dir = tempdir().unwrap();
     fs::create_dir(dir.path().join("node_modules")).unwrap();

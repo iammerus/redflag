@@ -52,7 +52,13 @@ native findings next to opaque private values.
 
 The general engine receives private temporary snapshots with a leading newline
 and neutral filenames, so upstream filename and binary-type skips cannot silently
-reduce coverage. Snapshots use 64 KiB windows with 32 KiB overlap; original line
+reduce coverage. Recognized code files retain a code extension class for generic
+source-expression filtering; other files retain unquoted configuration matching.
+The exact generic-password markers `YOUR_PASSWORD_HERE` and `your_password_here`
+are classified as instructional placeholders. Declared private values still block
+when they equal those markers. See [engines/README.md](engines/README.md) for the
+bounded normalization policy and adapter digest.
+Snapshots use 64 KiB windows with 32 KiB overlap; original line
 locations are restored and overlap duplicates are removed. Candidates touching a
 window edge are checked with adjacent context; unusually long candidates that
 cannot be inspected completely fail operationally. Native custom rules inspect
@@ -81,6 +87,7 @@ Coverage includes resolved targets,
 every selected file's relative path, size and SHA-256, selected private variable
 names, resource limits, representations, engine version and executable/config
 digests. It contains no private values. The
+adapter digest identifies the embedded report and normalization policy. The
 existing `scan --format json` array remains compatible.
 
 In GitHub Actions, `--format github` emits general error annotations and appends a

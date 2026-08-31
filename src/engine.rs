@@ -21,6 +21,7 @@ use tempfile::TempDir;
 const PINS: &str = include_str!("../engines/pins.json");
 const POLICY: &str = include_str!("../engines/betterleaks.toml");
 const REPORT: &str = include_str!("../engines/report.tmpl");
+const NORMALIZATION: &str = include_str!("../engines/normalization.json");
 const WINDOW: usize = 64 * 1024;
 const STRIDE: usize = WINDOW / 2;
 const MAX_REPORT: u64 = 64 * 1024 * 1024;
@@ -35,7 +36,7 @@ pub(crate) enum EngineChoice {
 
 pub(crate) enum GeneralEngine {
     Native(EngineInfo),
-    Betterleaks(Betterleaks),
+    Betterleaks(Box<Betterleaks>),
 }
 
 impl GeneralEngine {
@@ -50,7 +51,8 @@ impl GeneralEngine {
                 "--betterleaks-path requires --engine betterleaks".into(),
             )),
             EngineChoice::Native => Ok(Self::Native(EngineInfo::native(config_digest))),
-            EngineChoice::Betterleaks => Betterleaks::prepare(path, timeout).map(Self::Betterleaks),
+            EngineChoice::Betterleaks => Betterleaks::prepare(path, timeout)
+                .map(|engine| Self::Betterleaks(Box::new(engine))),
         }
     }
     pub fn info(&self) -> &EngineInfo {
@@ -88,6 +90,7 @@ pub(crate) struct EngineInfo {
     pub version: String,
     pub binary_sha256: Option<String>,
     pub config_sha256: String,
+    pub adapter_sha256: Option<String>,
     pub validation: bool,
     pub window_bytes: usize,
     pub overlap_bytes: usize,
@@ -100,6 +103,7 @@ impl EngineInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             binary_sha256: None,
             config_sha256,
+            adapter_sha256: None,
             validation: false,
             window_bytes: 0,
             overlap_bytes: 0,
@@ -113,6 +117,7 @@ impl EngineInfo {
         if self.name == "redflag-native" {
             return self.version == env!("CARGO_PKG_VERSION")
                 && self.binary_sha256.is_none()
+                && self.adapter_sha256.is_none()
                 && self.window_bytes == 0
                 && self.overlap_bytes == 0;
         }
@@ -122,6 +127,7 @@ impl EngineInfo {
         self.name == "betterleaks"
             && self.version == pins.version
             && self.config_sha256 == digest(POLICY.as_bytes())
+            && self.adapter_sha256.as_deref() == Some(adapter_digest().as_str())
             && self.window_bytes == WINDOW
             && self.overlap_bytes == WINDOW - STRIDE
             && pins
@@ -155,6 +161,42 @@ struct Window {
 struct Input {
     path: PathBuf,
     commit: Option<CommitMetadata>,
+    code: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Normalization {
+    schema_version: u32,
+    code_extensions: Vec<String>,
+    example_suffixes: Vec<String>,
+    generic_password_placeholders: Vec<String>,
+}
+
+impl Normalization {
+    fn is_code(&self, path: &Path) -> bool {
+        let extension = |path: &Path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        let mut ext = extension(path);
+        if self.example_suffixes.contains(&ext) {
+            if let Some(stem) = path.file_stem() {
+                ext = extension(Path::new(stem));
+            }
+        }
+        self.code_extensions.contains(&ext)
+    }
+}
+
+fn adapter_digest() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(REPORT.as_bytes());
+    hasher.update([0]);
+    hasher.update(NORMALIZATION.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Snapshot windows stay below the upstream reader's chunk size. Each byte is
@@ -166,6 +208,8 @@ pub(crate) struct Betterleaks {
     inputs: Vec<Input>,
     staged_bytes: u64,
     timeout: Duration,
+    normalization: Normalization,
+    password_placeholders: BTreeSet<String>,
     pub info: EngineInfo,
 }
 
@@ -176,6 +220,17 @@ impl Betterleaks {
                 "Engine timeout must be positive".into(),
             ));
         }
+        let normalization: Normalization = serde_json::from_str(NORMALIZATION)?;
+        if normalization.schema_version != 1 {
+            return Err(RedflagError::Config(
+                "Unsupported built-in engine normalization policy".into(),
+            ));
+        }
+        let password_placeholders = normalization
+            .generic_password_placeholders
+            .iter()
+            .map(|value| digest(value.as_bytes()))
+            .collect();
         let pins: Pins = serde_json::from_str(PINS)?;
         let os = match std::env::consts::OS {
             "macos" => "darwin",
@@ -227,11 +282,14 @@ impl Betterleaks {
             inputs: Vec::new(),
             staged_bytes: 0,
             timeout: Duration::from_secs(timeout_seconds),
+            normalization,
+            password_placeholders,
             info: EngineInfo {
                 name: "betterleaks".into(),
                 version: pins.version,
                 binary_sha256: Some(actual),
                 config_sha256: digest(POLICY.as_bytes()),
+                adapter_sha256: Some(adapter_digest()),
                 validation: false,
                 window_bytes: WINDOW,
                 overlap_bytes: WINDOW - STRIDE,
@@ -246,9 +304,11 @@ impl Betterleaks {
         commit: Option<CommitMetadata>,
     ) -> Result<(), RedflagError> {
         let input = self.inputs.len();
+        let code = self.normalization.is_code(original);
         self.inputs.push(Input {
             path: original.to_path_buf(),
             commit,
+            code,
         });
         let mut line = 1usize;
         let mut column = 1usize;
@@ -263,7 +323,7 @@ impl Betterleaks {
                 .workspace
                 .path()
                 .join("inputs")
-                .join(format!("{:08}.txt", self.windows.len()));
+                .join(window_name(self.windows.len(), code));
             let mut file = File::create(path)?;
             file.write_all(PREFIX)?;
             file.write_all(content)?;
@@ -394,8 +454,14 @@ impl Betterleaks {
             let found: EngineFinding =
                 serde_json::from_str(&record).map_err(|_| protocol_error())?;
             raw_count += 1;
-            for key in self.locate(found)? {
-                keys.insert(key);
+            let placeholder = found.rule_id == "generic-password"
+                && self.password_placeholders.contains(&found.secret_digest);
+            // Validate locations and completeness even for a reviewed placeholder.
+            let located = self.locate(found)?;
+            if !placeholder {
+                for key in located {
+                    keys.insert(key);
+                }
             }
         }
         if (status.code() == Some(10)) != (raw_count > 0) {
@@ -426,10 +492,14 @@ impl Betterleaks {
             .ok_or_else(protocol_error)?;
         let index: usize = name
             .strip_suffix(".txt")
+            .or_else(|| name.strip_suffix(".js"))
             .ok_or_else(protocol_error)?
             .parse()
             .map_err(|_| protocol_error())?;
         let window = self.windows.get(index).ok_or_else(protocol_error)?;
+        if name != window_name(index, self.inputs[window.input].code) {
+            return Err(protocol_error());
+        }
         if !valid_digest(&found.secret_digest)
             || found.rule_id.is_empty()
             || !found
@@ -575,6 +645,13 @@ impl Betterleaks {
 }
 
 type FindingKey = (usize, FindingSpan, Vec<FindingSpan>, String, String);
+
+fn window_name(index: usize, code: bool) -> String {
+    // The upstream password/username rules use a code-file class to distinguish
+    // expressions from unquoted configuration scalars. Neutral basenames and
+    // fixed extensions preserve that class without inheriting user path skips.
+    format!("{index:08}.{}", if code { "js" } else { "txt" })
+}
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
