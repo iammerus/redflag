@@ -477,6 +477,7 @@ impl Betterleaks {
                 snippet: "[REDACTED]".into(), severity: Severity::High, evidence,
                 primary: Some(primary),
                 grouping_key: Some(grouping_key),
+                representation: Vec::new(),
                 commit_hash: commit.map(|c| c.hash.clone()),
                 commit_author: commit.map(|c| c.author.clone()),
                 commit_date: commit.map(|c| c.date.clone()),

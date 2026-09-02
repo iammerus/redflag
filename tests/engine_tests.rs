@@ -50,6 +50,42 @@ fn report(output: Output, expected: i32) -> serde_json::Value {
 }
 
 #[test]
+#[ignore = "requires the pinned Betterleaks executable"]
+fn pinned_engine_artifacts_also_inspect_encoded_private_values() {
+    use base64::{engine::general_purpose, Engine};
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.bin");
+    let value = "opaque-Pvt!42";
+    let percent: String = format!("user:{value}:suffix")
+        .bytes()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
+    let encoded = general_purpose::STANDARD.encode(percent);
+    fs::write(&file, &encoded).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
+        .arg("artifacts")
+        .arg(&file)
+        .args(["--no-config", "--format", "json", "--betterleaks-path"])
+        .arg(engine_path())
+        .args(["--private-env", "RF_ENCODED_PRIVATE"])
+        .env("RF_ENCODED_PRIVATE", value)
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(value));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&encoded));
+    let result = report(output, 1);
+    let found = result["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["pattern_name"] == "private-env:RF_ENCODED_PRIVATE")
+        .unwrap();
+    assert_eq!(found["representation"][0]["kind"], "base64");
+    assert_eq!(found["representation"][1]["kind"], "url_percent");
+    assert_eq!(result["coverage"]["engine"]["name"], "betterleaks");
+}
+
+#[test]
 fn unpinned_executable_is_rejected_before_execution() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("input");
@@ -446,7 +482,7 @@ fn private_values_and_custom_rules_remain_redacted_and_manifests_record_engine()
     report(scan(&file, &["--manifest", manifest.to_str().unwrap()]), 0);
     let manifest_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(manifest_json["schema_version"], 3);
+    assert_eq!(manifest_json["schema_version"], 4);
     assert_eq!(manifest_json["detector"]["name"], "betterleaks");
     let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
         .arg("verify-artifacts")

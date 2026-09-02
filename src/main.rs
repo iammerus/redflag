@@ -1,6 +1,7 @@
 mod artifacts;
 mod changes;
 mod config;
+mod decoding;
 mod engine;
 mod error;
 mod exceptions;

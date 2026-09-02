@@ -47,6 +47,12 @@ Columns refer to original bytes, including invalid UTF-8. Editor character colum
 may differ. Source evidence points at the recorded commit, which may differ from
 the final checkout when a credential was subsequently removed.
 
+Decoded artifact private-value findings and locations add a `representation`
+array of transform steps. Their primary/evidence spans still refer to original
+file bytes; each step records candidate/input and match/output coordinates.
+See [DECODING.md](DECODING.md) for the nested coordinate contract. Raw observations
+omit this field, retaining their existing identities.
+
 ## Stability and privacy
 
 IDs identify versioned evidence, not globally persistent credentials:
@@ -57,8 +63,11 @@ IDs identify versioned evidence, not globally persistent credentials:
 - `rf-group-v1:` hashes the sorted occurrence IDs in a logical finding.
 
 The hash algorithm is SHA-256; IDs append its lowercase hexadecimal digest.
-Canonical location fields are serialized in `target`, `path`, `version`, `commit`
-order, omitting absent optional fields. Span fields are `start_line`, `end_line`,
+Canonical location fields are serialized in `target`, `path`, `version`, `commit`,
+`representation` order, omitting absent optional fields and empty representations.
+Transform steps retain their chain order; fields are `kind`, `encoded`, `decoded`.
+The chain and decoded coordinates distinguish matches sharing a coarse original
+Base64 region. Span fields are `start_line`, `end_line`,
 `start_column`, `end_column`; spans sort in that field order. JSON is compact UTF-8.
 
 Repeated scans of the same inputs retain IDs. Moving an artifact root while
@@ -96,7 +105,7 @@ No approved artifact manifest survives a failed requested rescan or report final
 Legacy `scan --format json` remains the original JSON array. Its opt-in
 `--format json-report` uses the separate version 1 contract described below.
 `verify-artifacts` and `show-config` retain their own version 1 envelopes;
-publication manifests retain their independent version 3 contract.
+publication manifests retain their independent version 4 contract.
 
 ## Legacy scan coverage
 

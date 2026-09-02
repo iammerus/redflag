@@ -75,7 +75,9 @@ and redaction regression tests. Do not change pins to accept an arbitrary binary
 Real-engine integration tests cover hidden/unknown/binary inputs, untrusted
 environment/config isolation, overlap and Unicode locations, provider boundaries,
 redaction, native custom rules, source references, literal/password key boundaries,
-private placeholder values and version 3 manifests. Run them with:
+private placeholder values, Redflag's decoded-private-value pipeline and version 4
+manifests. General engine inputs remain raw; see [DECODING.md](../DECODING.md).
+Run them with:
 
 ```sh
 python3 scripts/install_engine.py --directory target/debug/engines

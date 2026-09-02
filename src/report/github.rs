@@ -169,7 +169,7 @@ pub(super) fn render(
 
 fn location_label(occurrence: &PhysicalOccurrence) -> String {
     let location = &occurrence.location;
-    match &location.commit {
+    let mut label = match &location.commit {
         Some(commit) => format!(
             "{}:{} (commit {commit})",
             location.path, occurrence.primary.start_line
@@ -181,7 +181,14 @@ fn location_label(occurrence: &PhysicalOccurrence) -> String {
             occurrence.primary.start_line,
             location.version
         ),
+    };
+    if !location.representation.is_empty() {
+        label.push_str(&format!(
+            " [{}]",
+            crate::decoding::label(&location.representation)
+        ));
     }
+    label
 }
 
 fn append_summary(path: &Path, text: &str, context: &ReportContext) -> Result<(), RedflagError> {

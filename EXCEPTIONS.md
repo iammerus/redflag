@@ -120,6 +120,7 @@ not infer that a value is benign or that a credential has been revoked.
 
 Declared private values always block publication. Even a review targeting the exact
 private occurrence ID receives `rejected_private_value` status, with either engine.
+This includes matches in supported decoded representations; see [DECODING.md](DECODING.md).
 If a reason, reviewer label or policy origin contains a declared private value,
 Redflag masks that entire field as `[REDACTED PRIVATE VALUE]`. The recorded policy
 SHA-256 still identifies the original file bytes.
@@ -132,7 +133,7 @@ review across builds until expiry; the value is never exempted globally.
 
 ## Publication manifests and expiry
 
-Schema 3 manifests record total observations, zero blocking occurrences, the policy
+Schema 4 manifests record total observations, zero blocking occurrences, the policy
 audit and each accepted occurrence's ID, target, relative path, file SHA-256 and
 review. Report classification precedes manifest creation. Expired reviews or
 private-value matches prevent a manifest, and a failed requested rescan invalidates

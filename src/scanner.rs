@@ -38,6 +38,8 @@ pub struct Finding {
     pub evidence: Vec<FindingSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary: Option<FindingSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub representation: Vec<crate::decoding::Step>,
     /// Private per-scan grouping material; never part of a public finding.
     #[serde(skip)]
     pub(crate) grouping_key: Option<String>,
@@ -638,6 +640,7 @@ impl Scanner {
             description: detection.description.to_string(),
             evidence: Vec::new(),
             primary: None,
+            representation: Vec::new(),
             grouping_key: None,
             snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,

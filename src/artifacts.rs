@@ -47,6 +47,7 @@ pub(crate) struct ArtifactCoverage {
     pub symlinks: &'static str,
     pub private_value_representation: &'static str,
     pub native_detector_representation: &'static str,
+    pub private_decoding: crate::decoding::Coverage,
     pub limits: ScanLimits,
 }
 
@@ -62,6 +63,14 @@ impl crate::report::ReportCoverage for ArtifactCoverage {
             ("Inspected files", self.files.len().to_string()),
             ("Inspected bytes", self.total_bytes.to_string()),
             ("Declared private variables", self.private_env.join(", ")),
+            (
+                "Decoded private-value candidates",
+                self.private_decoding.candidates.to_string(),
+            ),
+            (
+                "Decoded bytes",
+                self.private_decoding.decoded_bytes.to_string(),
+            ),
             (
                 "Engine",
                 format!("{} {}", self.engine.name, self.engine.version),
@@ -184,6 +193,7 @@ impl ArtifactSet {
             symlinks: "reject",
             private_value_representation: "exact_raw_bytes",
             native_detector_representation: "lines_of_utf8_with_invalid_sequences_replaced",
+            private_decoding: crate::decoding::Coverage::new(!protected.names().is_empty()),
             limits: scanner.limits().clone(),
         };
         for (target, relative) in self.files {
@@ -199,6 +209,14 @@ impl ArtifactSet {
                     )
                 })?;
             protected.scan(&path, &bytes, handler)?;
+            crate::decoding::scan(
+                &path,
+                &bytes,
+                protected,
+                &coverage.limits,
+                &mut coverage.private_decoding,
+                handler,
+            )?;
             engine.add(&path, &bytes)?;
             for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
                 scanner.scan_artifact_line(

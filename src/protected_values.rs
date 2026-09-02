@@ -15,6 +15,7 @@ pub(crate) struct ProtectedValues {
     names: Vec<String>,
     matcher: Option<AhoCorasick>,
     max_value_len: usize,
+    min_value_len: usize,
 }
 
 impl ProtectedValues {
@@ -57,6 +58,11 @@ impl ProtectedValues {
     }
 
     fn from_values(values: Vec<(String, String)>) -> Result<Self, RedflagError> {
+        let min_value_len = values
+            .iter()
+            .map(|(_, value)| value.len())
+            .min()
+            .unwrap_or(usize::MAX);
         let max_value_len = values
             .iter()
             .map(|(_, value)| value.len())
@@ -75,11 +81,31 @@ impl ProtectedValues {
             names: values.into_iter().map(|(name, _)| name).collect(),
             matcher,
             max_value_len,
+            min_value_len,
         })
     }
 
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    pub fn minimum_length(&self) -> usize {
+        self.min_value_len
+    }
+
+    pub fn matches<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = (&'a str, std::ops::Range<usize>)> {
+        self.matcher
+            .iter()
+            .flat_map(move |matcher| matcher.find_overlapping_iter(bytes))
+            .map(|found| {
+                (
+                    self.names[found.pattern().as_usize()].as_str(),
+                    found.start()..found.end(),
+                )
+            })
     }
 
     pub fn contains(&self, text: &str) -> bool {
@@ -140,6 +166,7 @@ impl ProtectedValues {
                 evidence: vec![FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }],
                 primary: Some(FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }),
                 grouping_key: Some(crate::artifacts::digest(&bytes[found.start()..found.end()])),
+                representation: Vec::new(),
             })?;
             count += 1;
         }

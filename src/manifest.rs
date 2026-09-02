@@ -16,7 +16,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -37,6 +37,7 @@ struct Manifest {
     private_env: Vec<String>,
     symlinks: String,
     representations: Vec<String>,
+    private_decoding: crate::decoding::Coverage,
     limits: ScanLimits,
 }
 
@@ -105,6 +106,9 @@ impl ManifestOutput {
         report: &PreparedReport,
     ) -> Result<(), RedflagError> {
         let (findings_count, approval) = report.artifact_approval()?;
+        coverage
+            .private_decoding
+            .validate(!coverage.private_env.is_empty(), &coverage.limits)?;
         validate_approval(
             &approval,
             findings_count,
@@ -131,6 +135,7 @@ impl ManifestOutput {
                 coverage.private_value_representation.into(),
                 coverage.native_detector_representation.into(),
             ],
+            private_decoding: coverage.private_decoding.clone(),
             limits: coverage.limits.clone(),
         };
         serde_json::to_writer_pretty(&mut self.staged, &manifest)?;
@@ -160,6 +165,7 @@ pub(crate) struct Verification {
     pub findings_count: usize,
     pub accepted_occurrences_count: usize,
     pub exception_policy: exceptions::Audit,
+    pub private_decoding: crate::decoding::Coverage,
 }
 
 pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification, RedflagError> {
@@ -172,7 +178,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
     )?;
     let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| {
         RedflagError::Config(
-            "Manifest is not a supported schema 3 scan; scan the publication inputs again".into(),
+            "Manifest is not a supported schema 4 scan; scan the publication inputs again".into(),
         )
     })?;
     if manifest.schema_version != SCHEMA_VERSION
@@ -203,6 +209,9 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         ..Config::default()
     };
     config.validate()?;
+    manifest
+        .private_decoding
+        .validate(!manifest.private_env.is_empty(), &manifest.limits)?;
     validate_approval(
         &manifest.approval,
         manifest.findings_count,
@@ -288,6 +297,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         findings_count: manifest.findings_count,
         accepted_occurrences_count: manifest.approval.occurrences.len(),
         exception_policy: manifest.approval.policy,
+        private_decoding: manifest.private_decoding,
     })
 }
 

@@ -31,6 +31,11 @@ pub struct ScanLimits {
     pub max_findings: usize,
     pub max_diff_bytes: usize,
     pub diff_timeout_seconds: u64,
+    pub max_decode_depth: usize,
+    pub max_decode_candidates: usize,
+    pub max_decoded_bytes: u64,
+    pub max_decode_work_bytes: u64,
+    pub max_decode_map_runs: usize,
 }
 
 impl Default for ScanLimits {
@@ -44,6 +49,11 @@ impl Default for ScanLimits {
             max_findings: 100_000,
             max_diff_bytes: 4 * 1024 * 1024,
             diff_timeout_seconds: 10,
+            max_decode_depth: 4,
+            max_decode_candidates: 1_000_000,
+            max_decoded_bytes: 1024 * 1024 * 1024,
+            max_decode_work_bytes: 8 * 1024 * 1024 * 1024,
+            max_decode_map_runs: 262_144,
         }
     }
 }
@@ -461,6 +471,14 @@ impl Config {
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
+        if !(1..=16).contains(&self.limits.max_decode_depth)
+            || self.limits.max_decode_candidates == 0
+            || self.limits.max_decoded_bytes == 0
+            || self.limits.max_decode_work_bytes == 0
+            || self.limits.max_decode_map_runs == 0
+        {
+            return Err(RedflagError::Config("Decoding limits must be positive; limits.max_decode_depth must be between 1 and 16".into()));
+        }
         if self.limits.max_findings == 0
             || self.limits.max_diff_bytes == 0
             || self.limits.diff_timeout_seconds == 0

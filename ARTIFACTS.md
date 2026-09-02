@@ -50,6 +50,12 @@ declare up to 256 values, each at most 65,536 bytes. Unnamed environment variabl
 are never inspected. Every artifact finding has a fully redacted snippet, including
 native findings next to opaque private values.
 
+Declared private values are also matched in bounded JSON string escapes, URL
+percent/form encoding and canonical Base64 candidates, including nested forms
+and values encoded together with a prefix. Findings retain original byte locations
+and transform provenance. See [DECODING.md](DECODING.md) for supported syntax,
+limits and coverage. General credential rules continue inspecting raw inputs.
+
 The general engine receives private temporary snapshots with a leading newline
 and neutral filenames, so upstream filename and binary-type skips cannot silently
 reduce coverage. Recognized code files retain a code extension class for generic
@@ -71,8 +77,8 @@ locations needed on Windows. Source engine config files, ignore files and inline
 allow comments cannot change the pinned policy. A clean engine exit is accepted
 only when its inspected-byte counter matches every staged byte and it has no
 unexpected warning or error. Engine logs and secret captures are never forwarded.
-Decoding and archive inspection remain separate modernization work; transformed
-or compressed inner content is not yet certified as inspected.
+Redflag's own private-value decoder runs separately. Archive member inspection
+remains modernization work; compressed inner content is not certified as inspected.
 
 Artifact JSON uses a version 3 envelope with mode, completion status, scanner
 version, grouped logical findings, occurrence IDs, remediation, the original flat
@@ -139,8 +145,9 @@ empty files. Added, removed, changed or retyped files fail with exit 2. Metadata
 changes such as timestamps do not affect byte identity. The manifest records
 scanner/engine versions, the effective configuration digest and declared variable
 names; verification does not need the private environment values again.
-Manifests use schema version 3 and include the pinned detector identity, policy
-audit and exact accepted artifact reviews. Verification validates review expiry
+Manifests use schema version 4 and include the pinned detector identity, policy
+audit, exact accepted artifact reviews and private-decoding coverage receipt.
+Verification validates decoding coverage and review expiry
 before and after inventory verification. Earlier manifest schemas require a rescan.
 Verification reports accepted occurrence counts, including reviewed false positives.
 

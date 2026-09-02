@@ -93,7 +93,7 @@ fn artifact_reviews_authorize_exact_versions_and_manifests_retain_the_review() {
     assert_eq!(accepted["blocking_occurrences_count"], 0);
     assert_eq!(accepted["accepted_occurrences_count"], 1);
     let saved: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 3);
+    assert_eq!(saved["schema_version"], 4);
     assert_eq!(saved["findings_count"], 1);
     assert_eq!(saved["blocking_occurrences_count"], 0);
     assert_eq!(saved["approval"]["policy"], accepted["exception_policy"]);

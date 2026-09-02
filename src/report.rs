@@ -124,6 +124,7 @@ impl ReportContext {
                     .clone()
                     .ok_or_else(|| invalid("Source finding has no commit"))?,
                 commit: finding.commit_hash.clone(),
+                representation: finding.representation.clone(),
             }),
             _ => {
                 let file = self.artifacts.get(&finding.file).ok_or_else(|| {
@@ -134,6 +135,7 @@ impl ReportContext {
                     path: file.path.clone(),
                     version: file.version.clone(),
                     commit: None,
+                    representation: finding.representation.clone(),
                 })
             }
         }
@@ -149,6 +151,8 @@ pub(crate) struct Location {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub representation: Vec<crate::decoding::Step>,
 }
 
 struct ObservationPointer {
@@ -466,6 +470,13 @@ impl PreparedReport {
                                 .join(", ")
                         )?;
                         writeln!(writer, "    Occurrence: {}", occurrence.id)?;
+                        if !occurrence.location.representation.is_empty() {
+                            writeln!(
+                                writer,
+                                "    Representation: {}",
+                                crate::decoding::label(&occurrence.location.representation)
+                            )?;
+                        }
                         writeln!(writer, "    Status: {}", occurrence.status())?;
                         if let Some(review) = &occurrence.review {
                             writeln!(
@@ -549,6 +560,10 @@ fn prepare(
         if finding.evidence.is_empty()
             || !valid_span(primary)
             || finding.evidence.iter().any(|s| !valid_span(s))
+            || finding
+                .representation
+                .iter()
+                .any(|step| !valid_span(&step.encoded) || !valid_span(&step.decoded))
         {
             return Err(invalid("Finding has invalid location evidence"));
         }
