@@ -881,14 +881,15 @@ fn git_options_require_history_scanning() {
 fn closed_output_pipe_is_an_error() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join(".env"));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_redflag"))
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_redflag"))
         .args(["scan", dir.path().to_str().unwrap()])
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
