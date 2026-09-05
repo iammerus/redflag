@@ -492,6 +492,7 @@ mod tests {
             primary: None,
             grouping_key: None,
             representation: Vec::new(),
+            archive: Vec::new(),
         }
     }
 

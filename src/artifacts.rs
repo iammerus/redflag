@@ -48,6 +48,7 @@ pub(crate) struct ArtifactCoverage {
     pub private_value_representation: &'static str,
     pub native_detector_representation: &'static str,
     pub private_decoding: crate::decoding::Coverage,
+    pub archive_inspection: crate::archives::Coverage,
     pub limits: ScanLimits,
 }
 
@@ -62,6 +63,18 @@ impl crate::report::ReportCoverage for ArtifactCoverage {
             ("Targets", self.targets.len().to_string()),
             ("Inspected files", self.files.len().to_string()),
             ("Inspected bytes", self.total_bytes.to_string()),
+            (
+                "Inspected archives",
+                self.archive_inspection.archives.to_string(),
+            ),
+            (
+                "Archive members",
+                self.archive_inspection.members.to_string(),
+            ),
+            (
+                "Expanded archive bytes",
+                self.archive_inspection.expanded_bytes.to_string(),
+            ),
             ("Declared private variables", self.private_env.join(", ")),
             (
                 "Decoded private-value candidates",
@@ -194,6 +207,7 @@ impl ArtifactSet {
             private_value_representation: "exact_raw_bytes",
             native_detector_representation: "lines_of_utf8_with_invalid_sequences_replaced",
             private_decoding: crate::decoding::Coverage::new(!protected.names().is_empty()),
+            archive_inspection: crate::archives::Coverage::new(),
             limits: scanner.limits().clone(),
         };
         for (target, relative) in self.files {
@@ -208,24 +222,45 @@ impl ArtifactSet {
                         "Artifact bytes exceed limits.max_total_bytes while reading".into(),
                     )
                 })?;
-            protected.scan(&path, &bytes, handler)?;
-            crate::decoding::scan(
+            let mut inspect = |bytes: &[u8], members: &[crate::archives::Member]| {
+                let mut located = MemberHandler {
+                    root: &path,
+                    members,
+                    protected,
+                    handler,
+                };
+                protected.scan(&path, bytes, &mut located)?;
+                crate::decoding::scan(
+                    &path,
+                    bytes,
+                    protected,
+                    &coverage.limits,
+                    &mut coverage.private_decoding,
+                    &mut located,
+                )?;
+                engine.add_archive(&path, bytes, members)?;
+                let code_path = members
+                    .last()
+                    .map(|member| Path::new(&member.path))
+                    .unwrap_or(&path);
+                for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
+                    scanner.scan_artifact_line(
+                        code_path,
+                        index + 1,
+                        line.strip_suffix(b"\r").unwrap_or(line),
+                        &mut located,
+                    )?;
+                }
+                Ok(())
+            };
+            inspect(&bytes, &[])?;
+            crate::archives::inspect(
                 &path,
                 &bytes,
-                protected,
                 &coverage.limits,
-                &mut coverage.private_decoding,
-                handler,
+                &mut coverage.archive_inspection,
+                &mut inspect,
             )?;
-            engine.add(&path, &bytes)?;
-            for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
-                scanner.scan_artifact_line(
-                    &path,
-                    index + 1,
-                    line.strip_suffix(b"\r").unwrap_or(line),
-                    handler,
-                )?;
-            }
             coverage.files.push(ArtifactFile {
                 target,
                 path: relative,
@@ -233,11 +268,44 @@ impl ArtifactSet {
                 sha256: digest(&bytes),
             });
         }
-        engine.finish(handler)?;
+        engine.finish(&mut ArchiveRedaction { protected, handler })?;
         // Detect inventory or content changes during inspection before declaring
         // completeness. Publication still needs its own verification afterwards.
         verify_inventory(&coverage.targets, &coverage.files, &coverage.limits)?;
         Ok(coverage)
+    }
+}
+
+struct MemberHandler<'a, H> {
+    root: &'a Path,
+    members: &'a [crate::archives::Member],
+    protected: &'a ProtectedValues,
+    handler: &'a mut H,
+}
+impl<H: FindingHandler> FindingHandler for MemberHandler<'_, H> {
+    fn handle(&mut self, mut finding: crate::scanner::Finding) -> Result<(), RedflagError> {
+        finding.file = self.root.to_path_buf();
+        finding.archive = self.members.to_vec();
+        ArchiveRedaction {
+            protected: self.protected,
+            handler: self.handler,
+        }
+        .handle(finding)
+    }
+}
+
+struct ArchiveRedaction<'a, H> {
+    protected: &'a ProtectedValues,
+    handler: &'a mut H,
+}
+impl<H: FindingHandler> FindingHandler for ArchiveRedaction<'_, H> {
+    fn handle(&mut self, mut finding: crate::scanner::Finding) -> Result<(), RedflagError> {
+        for member in &mut finding.archive {
+            if self.protected.contains(&member.path) {
+                member.path = "[REDACTED PRIVATE VALUE]".into();
+            }
+        }
+        self.handler.handle(finding)
     }
 }
 

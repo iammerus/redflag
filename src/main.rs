@@ -1,3 +1,4 @@
+mod archives;
 mod artifacts;
 mod changes;
 mod config;

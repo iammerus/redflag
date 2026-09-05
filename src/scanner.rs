@@ -40,6 +40,8 @@ pub struct Finding {
     pub primary: Option<FindingSpan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub representation: Vec<crate::decoding::Step>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive: Vec<crate::archives::Member>,
     /// Private per-scan grouping material; never part of a public finding.
     #[serde(skip)]
     pub(crate) grouping_key: Option<String>,
@@ -641,6 +643,7 @@ impl Scanner {
             evidence: Vec::new(),
             primary: None,
             representation: Vec::new(),
+            archive: Vec::new(),
             grouping_key: None,
             snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,

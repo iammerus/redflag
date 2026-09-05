@@ -242,7 +242,7 @@ impl<H: FindingHandler> Inspection<'_, H> {
                 description: "Declared private value is present in decoded publication bytes. Remove it from the build output and rotate it if published.".into(),
                 snippet: "[REDACTED]".into(), severity: Severity::Critical,
                 commit_hash: None, commit_author: None, commit_date: None,
-                evidence: vec![primary.clone()], primary: Some(primary), representation: steps,
+                evidence: vec![primary.clone()], primary: Some(primary), representation: steps, archive: Vec::new(),
                 grouping_key: Some(digest(value)),
             })?;
         }

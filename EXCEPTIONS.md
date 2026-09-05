@@ -133,7 +133,7 @@ review across builds until expiry; the value is never exempted globally.
 
 ## Publication manifests and expiry
 
-Schema 4 manifests record total observations, zero blocking occurrences, the policy
+Schema 5 manifests record total observations, zero blocking occurrences, the policy
 audit and each accepted occurrence's ID, target, relative path, file SHA-256 and
 review. Report classification precedes manifest creation. Expired reviews or
 private-value matches prevent a manifest, and a failed requested rescan invalidates

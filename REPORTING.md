@@ -52,6 +52,9 @@ array of transform steps. Their primary/evidence spans still refer to original
 file bytes; each step records candidate/input and match/output coordinates.
 See [DECODING.md](DECODING.md) for the nested coordinate contract. Raw observations
 omit this field, retaining their existing identities.
+Archive findings also add an `archive` member chain. Their evidence spans refer
+to the innermost member; the outer file digest still anchors publication identity.
+See [ARCHIVES.md](ARCHIVES.md) for member paths, hashes and compressed provenance.
 
 ## Stability and privacy
 
@@ -64,7 +67,9 @@ IDs identify versioned evidence, not globally persistent credentials:
 
 The hash algorithm is SHA-256; IDs append its lowercase hexadecimal digest.
 Canonical location fields are serialized in `target`, `path`, `version`, `commit`,
-`representation` order, omitting absent optional fields and empty representations.
+`representation`, `archive` order, omitting absent optional fields and empty arrays.
+Archive steps retain chain order with fields `format`, `index`, `path`, `bytes`,
+`sha256`.
 Transform steps retain their chain order; fields are `kind`, `encoded`, `decoded`.
 The chain and decoded coordinates distinguish matches sharing a coarse original
 Base64 region. Span fields are `start_line`, `end_line`,
@@ -105,7 +110,7 @@ No approved artifact manifest survives a failed requested rescan or report final
 Legacy `scan --format json` remains the original JSON array. Its opt-in
 `--format json-report` uses the separate version 1 contract described below.
 `verify-artifacts` and `show-config` retain their own version 1 envelopes;
-publication manifests retain their independent version 4 contract.
+publication manifests retain their independent version 5 contract.
 
 ## Legacy scan coverage
 

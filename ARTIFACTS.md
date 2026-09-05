@@ -77,8 +77,10 @@ locations needed on Windows. Source engine config files, ignore files and inline
 allow comments cannot change the pinned policy. A clean engine exit is accepted
 only when its inspected-byte counter matches every staged byte and it has no
 unexpected warning or error. Engine logs and secret captures are never forwarded.
-Redflag's own private-value decoder runs separately. Archive member inspection
-remains modernization work; compressed inner content is not certified as inspected.
+Redflag's own private-value decoder and bounded gzip/ZIP/tar traversal run separately.
+All supported archive payloads receive general detection and private matching;
+unsupported or incomplete archives fail. See [ARCHIVES.md](ARCHIVES.md) for exact
+formats, member provenance and decompression limits.
 
 Artifact JSON uses a version 3 envelope with mode, completion status, scanner
 version, grouped logical findings, occurrence IDs, remediation, the original flat
@@ -145,9 +147,9 @@ empty files. Added, removed, changed or retyped files fail with exit 2. Metadata
 changes such as timestamps do not affect byte identity. The manifest records
 scanner/engine versions, the effective configuration digest and declared variable
 names; verification does not need the private environment values again.
-Manifests use schema version 4 and include the pinned detector identity, policy
-audit, exact accepted artifact reviews and private-decoding coverage receipt.
-Verification validates decoding coverage and review expiry
+Manifests use schema version 5 and include the pinned detector identity, policy
+audit, exact accepted artifact reviews and decoding/archive coverage receipts.
+Verification validates inspection coverage and review expiry
 before and after inventory verification. Earlier manifest schemas require a rescan.
 Verification reports accepted occurrence counts, including reviewed false positives.
 

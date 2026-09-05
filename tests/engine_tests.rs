@@ -86,6 +86,49 @@ fn pinned_engine_artifacts_also_inspect_encoded_private_values() {
 }
 
 #[test]
+#[ignore = "requires the pinned Betterleaks executable"]
+fn pinned_engine_inspects_archive_members_with_their_filename_context() {
+    use std::io::{Cursor, Write};
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("release.zip");
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, content) in [
+        ("dist/token.bin", format!("fixture\n{}\n", token())),
+        (
+            "dist/component.js",
+            "function render(props) { return login({password: props.password}); }".into(),
+        ),
+        (
+            "dist/.netrc",
+            "machine example.invalid login fixture password synthetic-value".into(),
+        ),
+    ] {
+        writer
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(content.as_bytes()).unwrap();
+    }
+    fs::write(&file, writer.finish().unwrap().into_inner()).unwrap();
+    let result = report(scan(&file, &[]), 1);
+    let found = result["findings"].as_array().unwrap();
+    assert!(found.iter().any(
+        |finding| finding["pattern_name"] == "betterleaks:github-pat"
+            && finding["archive"][0]["path"] == "dist/token.bin"
+    ));
+    assert!(found
+        .iter()
+        .any(|finding| finding["pattern_name"] == "Netrc Password"
+            && finding["archive"][0]["path"] == "dist/.netrc"));
+    assert!(!found
+        .iter()
+        .any(|finding| finding["archive"][0]["path"] == "dist/component.js"));
+}
+
+#[test]
 fn unpinned_executable_is_rejected_before_execution() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("input");
@@ -482,7 +525,7 @@ fn private_values_and_custom_rules_remain_redacted_and_manifests_record_engine()
     report(scan(&file, &["--manifest", manifest.to_str().unwrap()]), 0);
     let manifest_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(manifest_json["schema_version"], 4);
+    assert_eq!(manifest_json["schema_version"], 5);
     assert_eq!(manifest_json["detector"]["name"], "betterleaks");
     let output = Command::new(env!("CARGO_BIN_EXE_redflag"))
         .arg("verify-artifacts")

@@ -7,8 +7,8 @@ suffix; it does not depend on the encoding of the value alone.
 
 Only declared private values use this decoder. Betterleaks and native custom
 rules inspect the original file representations described in [ARTIFACTS.md](ARTIFACTS.md).
-Source `changes` and legacy `scan` do not use candidate decoding. Archive member
-inspection is not yet implemented. A complete scan certifies this stated scope;
+Source `changes` and legacy `scan` do not use candidate decoding. Supported archive
+members also receive this matching; see [ARCHIVES.md](ARCHIVES.md). A complete scan certifies this stated scope;
 it does not certify arbitrary transformations, encryption or fragmented values.
 
 ## Candidate grammar
@@ -71,7 +71,7 @@ limit prevents inspection, the scan exits 2 before report delivery and invalidat
 a requested approval manifest. A valid deeper candidate that could contain a
 private value fails the depth limit even if it would ultimately be clean.
 
-Artifact coverage and schema 4 manifests include a `private_decoding` receipt with
+Artifact coverage and schema 5 manifests include a `private_decoding` receipt with
 its own `schema_version: 1`, `enabled`, ordered `formats`, `candidates`,
 `decoded_bytes`, `work_bytes` and `max_depth_reached`. Decoding is enabled whenever
 private variables are declared. With none, counters stay zero. A short decoded

@@ -125,6 +125,7 @@ impl ReportContext {
                     .ok_or_else(|| invalid("Source finding has no commit"))?,
                 commit: finding.commit_hash.clone(),
                 representation: finding.representation.clone(),
+                archive: finding.archive.clone(),
             }),
             _ => {
                 let file = self.artifacts.get(&finding.file).ok_or_else(|| {
@@ -136,6 +137,7 @@ impl ReportContext {
                     version: file.version.clone(),
                     commit: None,
                     representation: finding.representation.clone(),
+                    archive: finding.archive.clone(),
                 })
             }
         }
@@ -153,6 +155,8 @@ pub(crate) struct Location {
     pub commit: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub representation: Vec<crate::decoding::Step>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub archive: Vec<crate::archives::Member>,
 }
 
 struct ObservationPointer {
@@ -470,6 +474,13 @@ impl PreparedReport {
                                 .join(", ")
                         )?;
                         writeln!(writer, "    Occurrence: {}", occurrence.id)?;
+                        if !occurrence.location.archive.is_empty() {
+                            writeln!(
+                                writer,
+                                "    Archive member: {}",
+                                clean_text(&crate::archives::label(&occurrence.location.archive))
+                            )?;
+                        }
                         if !occurrence.location.representation.is_empty() {
                             writeln!(
                                 writer,

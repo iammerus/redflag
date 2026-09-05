@@ -16,7 +16,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -38,6 +38,7 @@ struct Manifest {
     symlinks: String,
     representations: Vec<String>,
     private_decoding: crate::decoding::Coverage,
+    archive_inspection: crate::archives::Coverage,
     limits: ScanLimits,
 }
 
@@ -106,6 +107,7 @@ impl ManifestOutput {
         report: &PreparedReport,
     ) -> Result<(), RedflagError> {
         let (findings_count, approval) = report.artifact_approval()?;
+        coverage.archive_inspection.validate(&coverage.limits)?;
         coverage
             .private_decoding
             .validate(!coverage.private_env.is_empty(), &coverage.limits)?;
@@ -136,6 +138,7 @@ impl ManifestOutput {
                 coverage.native_detector_representation.into(),
             ],
             private_decoding: coverage.private_decoding.clone(),
+            archive_inspection: coverage.archive_inspection.clone(),
             limits: coverage.limits.clone(),
         };
         serde_json::to_writer_pretty(&mut self.staged, &manifest)?;
@@ -166,6 +169,7 @@ pub(crate) struct Verification {
     pub accepted_occurrences_count: usize,
     pub exception_policy: exceptions::Audit,
     pub private_decoding: crate::decoding::Coverage,
+    pub archive_inspection: crate::archives::Coverage,
 }
 
 pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification, RedflagError> {
@@ -178,7 +182,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
     )?;
     let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| {
         RedflagError::Config(
-            "Manifest is not a supported schema 4 scan; scan the publication inputs again".into(),
+            "Manifest is not a supported schema 5 scan; scan the publication inputs again".into(),
         )
     })?;
     if manifest.schema_version != SCHEMA_VERSION
@@ -209,6 +213,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         ..Config::default()
     };
     config.validate()?;
+    manifest.archive_inspection.validate(&manifest.limits)?;
     manifest
         .private_decoding
         .validate(!manifest.private_env.is_empty(), &manifest.limits)?;
@@ -298,6 +303,7 @@ pub(crate) fn verify(path: &Path, overrides: &[PathBuf]) -> Result<Verification,
         accepted_occurrences_count: manifest.approval.occurrences.len(),
         exception_policy: manifest.approval.policy,
         private_decoding: manifest.private_decoding,
+        archive_inspection: manifest.archive_inspection,
     })
 }
 

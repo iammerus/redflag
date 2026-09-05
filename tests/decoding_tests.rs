@@ -313,7 +313,7 @@ fn clean_manifests_bind_decoding_coverage_and_private_reviews_cannot_override_it
         result["coverage"]["private_decoding"]
     );
     let saved: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 4);
+    assert_eq!(saved["schema_version"], 5);
     for (pointer, replacement) in [
         ("/schema_version", json!(3)),
         ("/private_decoding/enabled", json!(false)),

@@ -61,9 +61,6 @@ impl GeneralEngine {
             Self::Betterleaks(engine) => &engine.info,
         }
     }
-    pub fn add(&mut self, path: &Path, bytes: &[u8]) -> Result<(), RedflagError> {
-        self.add_snapshot(path, bytes, None)
-    }
     pub fn add_snapshot(
         &mut self,
         path: &Path,
@@ -72,7 +69,18 @@ impl GeneralEngine {
     ) -> Result<(), RedflagError> {
         match self {
             Self::Native(_) => Ok(()),
-            Self::Betterleaks(engine) => engine.add(path, bytes, commit),
+            Self::Betterleaks(engine) => engine.add(path, bytes, commit, &[]),
+        }
+    }
+    pub fn add_archive(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        archive: &[crate::archives::Member],
+    ) -> Result<(), RedflagError> {
+        match self {
+            Self::Native(_) => Ok(()),
+            Self::Betterleaks(engine) => engine.add(path, bytes, None, archive),
         }
     }
     pub fn finish<H: FindingHandler>(self, handler: &mut H) -> Result<(), RedflagError> {
@@ -162,6 +170,7 @@ struct Input {
     path: PathBuf,
     commit: Option<CommitMetadata>,
     code: bool,
+    archive: Vec<crate::archives::Member>,
 }
 
 #[derive(Deserialize)]
@@ -302,13 +311,19 @@ impl Betterleaks {
         original: &Path,
         bytes: &[u8],
         commit: Option<CommitMetadata>,
+        archive: &[crate::archives::Member],
     ) -> Result<(), RedflagError> {
         let input = self.inputs.len();
-        let code = self.normalization.is_code(original);
+        let code_path = archive
+            .last()
+            .map(|member| Path::new(&member.path))
+            .unwrap_or(original);
+        let code = self.normalization.is_code(code_path);
         self.inputs.push(Input {
             path: original.to_path_buf(),
             commit,
             code,
+            archive: archive.to_vec(),
         });
         let mut line = 1usize;
         let mut column = 1usize;
@@ -478,6 +493,7 @@ impl Betterleaks {
                 primary: Some(primary),
                 grouping_key: Some(grouping_key),
                 representation: Vec::new(),
+                archive: input.archive.clone(),
                 commit_hash: commit.map(|c| c.hash.clone()),
                 commit_author: commit.map(|c| c.author.clone()),
                 commit_date: commit.map(|c| c.date.clone()),

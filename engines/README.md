@@ -75,8 +75,9 @@ and redaction regression tests. Do not change pins to accept an arbitrary binary
 Real-engine integration tests cover hidden/unknown/binary inputs, untrusted
 environment/config isolation, overlap and Unicode locations, provider boundaries,
 redaction, native custom rules, source references, literal/password key boundaries,
-private placeholder values, Redflag's decoded-private-value pipeline and version 4
-manifests. General engine inputs remain raw; see [DECODING.md](../DECODING.md).
+private placeholder values, Redflag's decoded-private-value pipeline, archive member
+context and version 5 manifests. General engine inputs are original file and expanded
+member bytes; see [DECODING.md](../DECODING.md) and [ARCHIVES.md](../ARCHIVES.md).
 Run them with:
 
 ```sh

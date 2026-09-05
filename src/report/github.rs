@@ -188,6 +188,9 @@ fn location_label(occurrence: &PhysicalOccurrence) -> String {
             crate::decoding::label(&location.representation)
         ));
     }
+    if !location.archive.is_empty() {
+        label.push_str(&format!(" [{}]", crate::archives::label(&location.archive)));
+    }
     label
 }
 

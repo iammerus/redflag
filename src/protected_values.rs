@@ -166,7 +166,7 @@ impl ProtectedValues {
                 evidence: vec![FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }],
                 primary: Some(FindingSpan { start_line: line, end_line, start_column: column, end_column: end - line_start }),
                 grouping_key: Some(crate::artifacts::digest(&bytes[found.start()..found.end()])),
-                representation: Vec::new(),
+                representation: Vec::new(), archive: Vec::new(),
             })?;
             count += 1;
         }
