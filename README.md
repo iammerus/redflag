@@ -22,8 +22,10 @@ See [engine installation and verification](engines/README.md). The legacy `scan`
 command needs no external engine; `artifacts --engine native` selects that detector
 explicitly for compatibility.
 
-Release tags use the `v<version>` form. Package version `0.1.1` therefore uses
-tag `v0.1.1`. Release builds provide Linux, Windows, and macOS x86-64 binaries.
+Release tags use the `v<version>` form. This checkout prepares version `0.2.0`;
+the published `v0.1.1` release predates the modernization work. See
+[RELEASES.md](RELEASES.md) for native bundle construction, verification and the
+current platform validation status, including Apple Silicon.
 
 ## Quick start
 

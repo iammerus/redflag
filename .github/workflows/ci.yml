@@ -14,6 +14,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Verify release bundle integrity and installation failure paths
+        run: python3 scripts/test_release_bundle.py
       - name: Install checksum-verified offline engine for integration tests
         run: |
           python3 scripts/test_install_engine.py
