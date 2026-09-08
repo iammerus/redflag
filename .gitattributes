@@ -1,0 +1,2 @@
+# Keep reviewed policy, license and source bytes identical on every release runner.
+* text=auto eol=lf

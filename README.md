@@ -59,33 +59,39 @@ handling, coverage and current limitations.
 
 ## GitHub Action
 
-Add Redflag to a workflow:
+The prepared `v0.2.0` Action installs verified native binaries and supports source
+changes, publication inputs and manifest verification. It must be published before
+these release-download examples can run; `v0.1.1` retains the older Action.
 
 ```yaml
-name: Secret scan
-
-on: [push, pull_request]
-
+name: Credential check
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
 jobs:
   redflag:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: iammerus/redflag@v0.1.1
+          persist-credentials: false
+      - uses: iammerus/redflag@v0.2.0 # Prefer the published release's full commit SHA
         with:
-          git-history: "true"
+          mode: changes
 ```
 
-The action accepts optional `path` and `config` inputs. It builds the selected
-Redflag revision with stable Rust, redacts secrets by default, and fails when
-findings are present.
-
-Run the action after the build step to include generated assets. Directory scans
-now include `dist`, `build`, `out`, `.next`, `.nuxt`, minified JavaScript, and source
-maps. Dependency folders and caches remain excluded. Review existing custom
-exclusions if these files were previously ignored in your configuration.
+For generated output, run `mode: artifacts` after the trusted build and supply
+explicit `paths` and any `private-env` names. Write a manifest outside those inputs
+and use `mode: verify-artifacts` when a later upload consumes copied output. The
+Action defaults to legacy `scan` for compatibility with existing `path`, `config`
+and `git-history` inputs. See [ACTION.md](ACTION.md) for complete workflows,
+permissions, input contracts and verification requirements.
 
 ## Detection coverage
 
@@ -192,6 +198,11 @@ the Git repository root. Outside Git, discovery stops at the filesystem root.
 The nearest file is merged with built-in defaults; parent policies are not layered.
 Artifact scans start discovery at the current workflow directory, so a config
 file inside generated output cannot select the scan's policy.
+
+`--config FILE` selects that file explicitly. `--no-config` disables discovery;
+the two options conflict. Use a trusted explicit policy in CI when a source branch
+can modify its own configuration. The Action's `changes` mode uses trusted base
+policy by default; see [ACTION.md](ACTION.md).
 
 Inspect the resolved policy without scanning:
 

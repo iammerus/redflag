@@ -45,12 +45,16 @@ Bundles contain Redflag, `engines/betterleaks` (both with `.exe` on Windows), th
 Redflag and Betterleaks license notices, a dependency notice inventory, and license
 files from resolved Rust packages and their bundled native dependencies. Native
 notices include libgit2, libssh2, zlib and OpenSSL. Cargo metadata is build input;
-the resulting archive contains no local dependency paths or source trees.
+the resulting archive contains no local dependency paths or source trees. The
+notice inventory includes resolved development/build packages as well as runtime
+dependencies; it is not a minimal runtime software bill of materials.
 
 `manifest.json` version 1 records the version, platform, target, source commit and
 dirty flag, engine version/pin identity, and every payload's size, SHA-256 and
 executable status. Archive ordering and gzip/tar timestamps are deterministic for
-identical inputs. The builder verifies its finished archive before moving it to
+identical inputs. Git attributes keep reviewed source/policy/license text in LF
+form on every runner, so Windows checkout conversion cannot change their hashes.
+The builder verifies its finished archive before moving it to
 the requested destination. Existing destinations are not replaced.
 
 ## Verify and install a supplied bundle
@@ -68,7 +72,8 @@ also require verified build provenance before this installer runs.
 
 Verification checks the archive digest before decompression, then enforces bounded
 gzip expansion and a strict regular-file tar inventory. It rejects links, traversal,
-duplicate entries, extended headers, truncated/checksum-invalid archives, unexpected
+duplicate/case-colliding entries, Windows device/path aliases, extended headers,
+truncated/checksum-invalid archives, unexpected
 payloads, incorrect license notices, manifest mismatches and modified engines. Only
 the two expected binaries become executable. Installation stages files in a private
 directory and moves the complete directory into place; validation failures create
@@ -79,3 +84,47 @@ Limits are 128 MiB compressed, 256 MiB payload bytes plus bounded tar overhead,
 these boundaries and rejection paths without executing synthetic fixture binaries.
 No test or source-tree hash alone proves that a hosted release was published or
 that its build provenance was verified.
+
+## Release downloads and build provenance
+
+The default Action download path uses GitHub CLI to verify a bundle's SLSA build
+attestation before installation. It requires all of the following:
+
+- Repository `iammerus/redflag` and signer workflow `.github/workflows/release.yml`.
+- Source ref `refs/tags/v0.2.0` and exact source/signer commit matching the Action
+  pin (or the resolved matching release tag).
+- A GitHub-hosted build runner, followed by package checks requiring a clean source
+  tree and the same commit, version, platform and reviewed engine identity.
+
+The checksum inventory protects transfer consistency; attestation verification
+establishes the required publisher/workflow/source relationship. It does not prove
+that the source code itself is safe. No fallback to an older release, source build,
+unverified binary or alternative platform runs. Authentication is confined to the
+GitHub API and verifier; authenticated requests never follow redirects. Asset
+downloads receive no token. The verifier receives a small OS/runtime environment
+and the download token, rather than the application build's environment.
+
+The policy uses the documented [`gh attestation verify` options](https://cli.github.com/manual/gh_attestation_verify).
+
+## Hosted build and publication gates
+
+`.github/workflows/release.yml` runs only for version tags. It calls CI, builds
+each platform natively with Rust 1.98.1, runs native tests and real Action integration
+checks, then attests and uploads each complete bundle. Platforms/runners must match
+`release/platforms.json`; package versions and the official tag/workflow context
+must agree. The Apple Silicon target has its own job, with no Rosetta fallback.
+
+The publication job requires every platform job to pass and exactly one bundle
+and checksum per platform. It verifies all attestations, source/package manifests
+and digests before running any release-writing command. It creates a populated
+draft and then publishes it; it never overwrites an existing release. This ordering
+also works when GitHub release immutability is enabled. See GitHub's
+[immutable release guidance](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
+
+Only the official GitHub.com repository's release workflow can run the publishing
+helper. A failed publication that already created a draft requires maintainer
+inspection before retrying; scripts do not delete drafts, assets or tags to recover.
+`scripts/test_release_ci.py` verifies those gates with all publishing commands
+mocked. No hosted build, tag push or publication has been performed during local
+implementation. Linux/Windows/macOS Intel runtime compatibility and the first
+Redflag download/attestation round trip still require the real release workflow.

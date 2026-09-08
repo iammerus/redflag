@@ -893,7 +893,9 @@ fn closed_output_pipe_is_an_error() {
     let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Broken pipe"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .to_lowercase()
+        .contains("pipe"));
 }
 
 #[test]

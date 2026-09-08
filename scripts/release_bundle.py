@@ -179,9 +179,11 @@ def make_bundle(binary, engine, key, source_commit, metadata, destination):
 
 def safe_member(name):
     path = PurePosixPath(name)
-    return (isinstance(name, str) and len(name) <= 1024 and path.as_posix() == name
-            and not path.is_absolute() and all(part not in (".", "..") for part in path.parts)
-            and bool(path.parts) and not any(ord(char) < 32 or char in "\\:" for char in name))
+    devices = {"con", "prn", "aux", "nul"} | {f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(10)}
+    return (isinstance(name, str) and name.isascii() and len(name) <= 1024 and path.as_posix() == name
+            and not path.is_absolute() and all(part not in (".", "..") and not part.endswith((".", " "))
+                and part.split(".")[0].lower() not in devices for part in path.parts)
+            and bool(path.parts) and not any(ord(char) < 32 or ord(char) == 127 or char in "\\:~" for char in name))
 
 
 def verify_bundle(data, checksum, key, source_commit=None):
@@ -190,6 +192,7 @@ def verify_bundle(data, checksum, key, source_commit=None):
     if key not in PLATFORMS:
         raise ValueError("Unsupported release platform")
     files = {}
+    folded_names = set()
     total = 0
     # Bound decompression before metadata parsing. High-level tar iteration can
     # consume arbitrarily large PAX/GNU headers before yielding a file to inspect.
@@ -210,7 +213,7 @@ def verify_bundle(data, checksum, key, source_commit=None):
             raise ValueError("Release archive header is truncated")
         entry = tarfile.TarInfo.frombuf(block, "utf-8", "strict")
         if (len(files) >= MAX_FILES or entry.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
-                or not safe_member(entry.name) or entry.name in files
+                or not safe_member(entry.name) or entry.name.lower() in folded_names
                 or entry.size < 0 or entry.size > MAX_MEMBER):
             raise ValueError("Release archive has an invalid or oversized member")
         total += entry.size
@@ -222,6 +225,7 @@ def verify_bundle(data, checksum, key, source_commit=None):
         if cursor > len(expanded) or any(expanded[end:cursor]):
             raise ValueError("Release archive member is truncated or has invalid padding")
         files[entry.name] = expanded[start:end]
+        folded_names.add(entry.name.lower())
     if "manifest.json" not in files or len(files["manifest.json"]) > 4 * 1024 * 1024:
         raise ValueError("Release manifest is missing or oversized")
     manifest = json.loads(files.pop("manifest.json"))

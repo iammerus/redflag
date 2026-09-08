@@ -110,6 +110,8 @@ class BundleTests(unittest.TestCase):
     def test_archive_structure_rejects_links_duplicates_traversal_and_extensions(self):
         for name, kind in [(self.binary, tarfile.REGTYPE), ("../escape", tarfile.REGTYPE),
                 ("/absolute", tarfile.REGTYPE), ("bad\\path", tarfile.REGTYPE),
+                ("licenses/rust/.. /escape", tarfile.REGTYPE), ("licenses/rust/NUL.txt", tarfile.REGTYPE),
+                ("licenses/rust/short~1", tarfile.REGTYPE), ("license", tarfile.REGTYPE),
                 ("alias", tarfile.SYMTYPE), ("alias", tarfile.LNKTYPE), ("metadata", tarfile.XHDTYPE)]:
             header = tarfile.TarInfo(name); header.type = kind
             with self.subTest(name=name, kind=kind), self.assertRaises((ValueError, tarfile.TarError)):

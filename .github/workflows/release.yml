@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_x64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - platform: windows_x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - platform: darwin_x64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - platform: darwin_arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      REDFLAG_PLATFORM: ${{ matrix.platform }}
+      REDFLAG_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - name: Validate release tag and native platform
+        shell: bash
+        run: python3 scripts/release_ci.py validate
+      - name: Install pinned engine
+        shell: bash
+        run: python3 scripts/install_engine.py --directory target/debug/engines
+      - name: Run native platform tests
+        shell: bash
+        run: |
+          python3 scripts/test_release_bundle.py
+          python3 scripts/test_action.py
+          python3 scripts/test_release_ci.py
+          cargo test --locked --all-targets -- --include-ignored
+      - name: Build and package native release
+        shell: bash
+        run: |
+          cargo build --locked --release --target "$REDFLAG_TARGET"
+          python3 scripts/release_ci.py package
+      - name: Exercise the packaged Action
+        shell: bash
+        run: python3 scripts/release_ci.py test
+      - name: Attest the complete bundle
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ runner.temp }}/redflag-release/*.tar.gz
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/redflag-release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/redflag-release
+          merge-multiple: true
+      - name: Verify every signed bundle and publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_ci.py publish
