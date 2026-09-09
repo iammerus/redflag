@@ -1,0 +1,470 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "vite-react",
+      "repository": "vitejs/vite",
+      "source_commit": "99bd9d1d46153fa939f4a304cc0177db42e28776",
+      "subtree": "packages/create-vite/template-react",
+      "files": [
+        {
+          "path": "README.md",
+          "upstream_path": "packages/create-vite/template-react/README.md",
+          "git_blob": "d937833bd5b8c9cfc5978ab9f0fcfd68d4d8b42c",
+          "bytes": 1009,
+          "sha256": "1f8fa46483b514305f44e34a47e85e88428c3a667c9494e1583628ef18d7bc79"
+        },
+        {
+          "path": "UPSTREAM_LICENSE",
+          "upstream_path": "LICENSE",
+          "git_blob": "b7e97ecb6aa4dd70b3e3a637afa2ae16feb7cd12",
+          "bytes": 1101,
+          "sha256": "692057af3d664cbb79ac38293eb50aa3c4987f8182e2a440136e59e08f1b4a54"
+        },
+        {
+          "path": "_gitignore",
+          "upstream_path": "packages/create-vite/template-react/_gitignore",
+          "git_blob": "a547bf36d8d11a4f89c59c144f24795749086dd1",
+          "bytes": 253,
+          "sha256": "fe718e7babb14f3cbad2d97f08889b9ce5215ed3fe0e43b2b8cfbfb3b9b844e8"
+        },
+        {
+          "path": "_oxlintrc.json",
+          "upstream_path": "packages/create-vite/template-react/_oxlintrc.json",
+          "git_blob": "1255078235d0ce4e80ac34866d5ce2af89aa6220",
+          "bytes": 231,
+          "sha256": "1be899e45c49b2a2edc715bc3bfb31d8ed8e866ed7ebab2065ff6e55e88c2396"
+        },
+        {
+          "path": "index.html",
+          "upstream_path": "packages/create-vite/template-react/index.html",
+          "git_blob": "594488ac3aaab1a7e2b54736d063275b2bcfbe31",
+          "bytes": 364,
+          "sha256": "5cb8980fedcf4a016fa1019a0719ff30929411f86930b40cb708d0cbe19f2cdc"
+        },
+        {
+          "path": "package.json",
+          "upstream_path": "packages/create-vite/template-react/package.json",
+          "git_blob": "47f6696d4d9a00346acc4621b35df50f156c3e25",
+          "bytes": 469,
+          "sha256": "4485339d64b044ba1548b0baf188dc4cd34a730a4392726d8c5ad25ed0ec0f5c"
+        },
+        {
+          "path": "public/favicon.svg",
+          "upstream_path": "packages/create-vite/template-react/public/favicon.svg",
+          "git_blob": "6893eb13237060adc0c968a690149a49faa2d7d3",
+          "bytes": 9522,
+          "sha256": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66"
+        },
+        {
+          "path": "public/icons.svg",
+          "upstream_path": "packages/create-vite/template-react/public/icons.svg",
+          "git_blob": "e9522193d9f796a9748e9ad8c952a5df73c87db9",
+          "bytes": 5031,
+          "sha256": "b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a"
+        },
+        {
+          "path": "src/App.css",
+          "upstream_path": "packages/create-vite/template-react/src/App.css",
+          "git_blob": "f90339d8f765fa2c69d9a341959a8ddb9fff5720",
+          "bytes": 2891,
+          "sha256": "6e25a776d3e8102da5bacb3cb99f4a5fc662a2e01e6143140671a556d28c3d5c"
+        },
+        {
+          "path": "src/App.jsx",
+          "upstream_path": "packages/create-vite/template-react/src/App.jsx",
+          "git_blob": "174b3f1dc0bb2db2b7e2581ce35d5bf440f617cc",
+          "bytes": 3646,
+          "sha256": "3226560e76fae0a061d973aee04d87fc5e3f4c4b41d94777ab622c4b19aa4067"
+        },
+        {
+          "path": "src/assets/hero.png",
+          "upstream_path": "packages/create-vite/template-react/src/assets/hero.png",
+          "git_blob": "02251f4b956c55af2d76fd0788124d7eee2b45eb",
+          "bytes": 13057,
+          "sha256": "881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c"
+        },
+        {
+          "path": "src/assets/react.svg",
+          "upstream_path": "packages/create-vite/template-react/src/assets/react.svg",
+          "git_blob": "6c87de9bb3358469122cc991d5cf578927246184",
+          "bytes": 4126,
+          "sha256": "35ef61ed53b323ae94a16a8ec659b3d0af3880698791133f23b084085ab1c2e5"
+        },
+        {
+          "path": "src/assets/vite.svg",
+          "upstream_path": "packages/create-vite/template-react/src/assets/vite.svg",
+          "git_blob": "5101b674df391399da71c767aa5c976426c9dc7a",
+          "bytes": 8709,
+          "sha256": "5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f"
+        },
+        {
+          "path": "src/index.css",
+          "upstream_path": "packages/create-vite/template-react/src/index.css",
+          "git_blob": "2c84af069a9d5a22b28df0a263fcc7b4f4b5a5b9",
+          "bytes": 2169,
+          "sha256": "fda85fffe7f006d822fb9ab4e774b9e2b8fadffa73a3806b038dc0b8456cbbeb"
+        },
+        {
+          "path": "src/main.jsx",
+          "upstream_path": "packages/create-vite/template-react/src/main.jsx",
+          "git_blob": "b9a1a6deac8775b5598874b2bc3c7971d82cf211",
+          "bytes": 229,
+          "sha256": "4b4b864dbe45253425d0c925337180ec07e204295179f80f59551216f466f618"
+        },
+        {
+          "path": "vite.config.js",
+          "upstream_path": "packages/create-vite/template-react/vite.config.js",
+          "git_blob": "9982072c14949379a05b48f656856691a6f0ab86",
+          "bytes": 161,
+          "sha256": "e1eefd0ed1639c88d1213884ef760516884db9e168190e223fee6b063ad3e088"
+        }
+      ]
+    },
+    {
+      "id": "next-static",
+      "repository": "vercel/next.js",
+      "source_commit": "d5276f04a1406b131a98efb77866a256fb68178f",
+      "subtree": "examples/with-static-export",
+      "files": [
+        {
+          "path": ".gitignore",
+          "upstream_path": "examples/with-static-export/.gitignore",
+          "git_blob": "8777267507c0eed1d543499a9dca179da99edc16",
+          "bytes": 437,
+          "sha256": "d917b58f24ebb26d844a6885efc5d465952524c7f60c67e824a855e95afe85db"
+        },
+        {
+          "path": "README.md",
+          "upstream_path": "examples/with-static-export/README.md",
+          "git_blob": "de15e789fb2d4ffd6c618086dd34e6628e5a6ca3",
+          "bytes": 1234,
+          "sha256": "0c39070444a17887075c63c24a38ef73fb71e180ad579519ba23aaebbbd92901"
+        },
+        {
+          "path": "UPSTREAM_LICENSE",
+          "upstream_path": "license.md",
+          "git_blob": "5948ee9bd0de5064423688a2967ab3111c2658ed",
+          "bytes": 1079,
+          "sha256": "ee765244e2d59f5234d474f62e0766fa0c8b99af967fdd4c0cb8dcb0c76ea224"
+        },
+        {
+          "path": "app/about/page.tsx",
+          "upstream_path": "examples/with-static-export/app/about/page.tsx",
+          "git_blob": "147c42e6d0a6807504ba930ec2074a5cdd8d31b7",
+          "bytes": 187,
+          "sha256": "20f1ff80ba4a87245127b84e8163537a57941553630c4c92cd6ecce007d6d567"
+        },
+        {
+          "path": "app/layout.tsx",
+          "upstream_path": "examples/with-static-export/app/layout.tsx",
+          "git_blob": "225b6038d7fbf06c3826e698e858a74fdd525560",
+          "bytes": 169,
+          "sha256": "81249a705e36334b8526c3b0d9dc77075d9afe928d96e490fd6d9e66400ba480"
+        },
+        {
+          "path": "app/page.tsx",
+          "upstream_path": "examples/with-static-export/app/page.tsx",
+          "git_blob": "8cee70205ef07a5374e37f5c80fb95d556d6885d",
+          "bytes": 260,
+          "sha256": "d7560b486e344c3984122986ae87163825ca11a4ffc3466f7100d75602cf2197"
+        },
+        {
+          "path": "next.config.js",
+          "upstream_path": "examples/with-static-export/next.config.js",
+          "git_blob": "e18dd005eded66189693ad6fb97ef554ed1ce732",
+          "bytes": 134,
+          "sha256": "54393be524821b4861c47caa2eadb5ccc79841a011e7875c8eb93b3b5255e581"
+        },
+        {
+          "path": "package.json",
+          "upstream_path": "examples/with-static-export/package.json",
+          "git_blob": "2b992cdf50347d0299a40f930a144c6e8bbafbdf",
+          "bytes": 361,
+          "sha256": "cf3d16661cf6ee2056395710332f7d2feb3828255f2cb11a144924c6338ff6b3"
+        },
+        {
+          "path": "tsconfig.json",
+          "upstream_path": "examples/with-static-export/tsconfig.json",
+          "git_blob": "fbdd5aa115fdab3179aa97a6f605bf9ae7a02948",
+          "bytes": 638,
+          "sha256": "62b23c504f26b3643b082161cb2f2341ea8d9be3d6f96cbab79b6b2921ef02c0"
+        }
+      ]
+    },
+    {
+      "id": "astro-blog",
+      "repository": "withastro/astro",
+      "source_commit": "26d69c0de73b0ac94eb00f6d41cff714885047b1",
+      "subtree": "examples/blog",
+      "files": [
+        {
+          "path": ".codesandbox/Dockerfile",
+          "upstream_path": "examples/blog/.codesandbox/Dockerfile",
+          "git_blob": "3b602c743c82fae9648fb4f9e5ab118c3ddc2f79",
+          "bytes": 27,
+          "sha256": "fa94e64a439fadf9070536654084ea914befc77ab4721f4a3092a72f5a908e20"
+        },
+        {
+          "path": ".gitignore",
+          "upstream_path": "examples/blog/.gitignore",
+          "git_blob": "16d54bb13c8a867268b45c22eb7794d2625a78f5",
+          "bytes": 264,
+          "sha256": "12dc4676e70590a75488b85502453e80ceb15c200ea5eee70d69458719c7a44c"
+        },
+        {
+          "path": ".vscode/extensions.json",
+          "upstream_path": "examples/blog/.vscode/extensions.json",
+          "git_blob": "56f043d30eefadaf2cc819f2eb7949e75e1c315d",
+          "bytes": 111,
+          "sha256": "644546aa80ceeb45dc8b2f4c7840fd9522fb41d8592da9e11409dea2ecb06d11"
+        },
+        {
+          "path": ".vscode/launch.json",
+          "upstream_path": "examples/blog/.vscode/launch.json",
+          "git_blob": "d6422097621fd7c1b1ccc6daa670c46aed7ef5b7",
+          "bytes": 207,
+          "sha256": "461accad2f8d7604a8470fb4705b84768bcf24791b0974d49cba0d96c3fea857"
+        },
+        {
+          "path": "README.md",
+          "upstream_path": "examples/blog/README.md",
+          "git_blob": "c5b756145819fb1f8acc239e893ba784907d18c4",
+          "bytes": 3101,
+          "sha256": "3829f9c989b9a2bff7c835d8e5072d7a67e70a3f96a4fc9c5ec56dd17b3733f7"
+        },
+        {
+          "path": "UPSTREAM_LICENSE",
+          "upstream_path": "LICENSE",
+          "git_blob": "b3cd0c0f0e01d20109fc8660a4d6b7dc9a22bc49",
+          "bytes": 3628,
+          "sha256": "4aa72be797aad0e5e21827eaae6a1df9e122d7a401f07d2c308a6b9a5f0e1278"
+        },
+        {
+          "path": "astro.config.mjs",
+          "upstream_path": "examples/blog/astro.config.mjs",
+          "git_blob": "ea43603de26fec4fb95654afbbf40bb5862f5460",
+          "bytes": 735,
+          "sha256": "b70b6fe768af19c2abfc37a5d9c54cdd8a69d5eb69816ede74524905106da5f6"
+        },
+        {
+          "path": "package.json",
+          "upstream_path": "examples/blog/package.json",
+          "git_blob": "84f71975f40082bf4f93ae7a21b21f3d05eb095d",
+          "bytes": 471,
+          "sha256": "6158697aacb3c8d6693afa486b776fece215f0a0a53452a3699bb67782a26c87"
+        },
+        {
+          "path": "public/favicon.ico",
+          "upstream_path": "examples/blog/public/favicon.ico",
+          "git_blob": "7f48a94d16071d6c8d06478c7458ab12e675019c",
+          "bytes": 655,
+          "sha256": "09d2ac08d8cca9b6e1f90221f345a8c4dd0371c64a0dc52b6f96fc589b1e3d67"
+        },
+        {
+          "path": "public/favicon.svg",
+          "upstream_path": "examples/blog/public/favicon.svg",
+          "git_blob": "f157bd1c5e287c70a508a98a13f538491aa4dafc",
+          "bytes": 749,
+          "sha256": "2d7a310283d6f9cc753210d83224cd6db6348cb82a5536348884e5831d46203f"
+        },
+        {
+          "path": "src/assets/blog-placeholder-1.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-1.jpg",
+          "git_blob": "74d4009b527342f03264c9caefd390aa5247b376",
+          "bytes": 32040,
+          "sha256": "06a35a9434dc3bb33e2b5b7d0ba08454fbd7724e6a4017c5e609b3fe749a943c"
+        },
+        {
+          "path": "src/assets/blog-placeholder-2.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-2.jpg",
+          "git_blob": "c4214b0e639a782769ea329846e51ec066b7976e",
+          "bytes": 33136,
+          "sha256": "583b4e1d0faef6330cc1e9cb635bdd2233f8a771c756faa60c06c70f620d71c1"
+        },
+        {
+          "path": "src/assets/blog-placeholder-3.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-3.jpg",
+          "git_blob": "fbe2ac0cb0c744ddfa28d406c0e90956a3398aaa",
+          "bytes": 28687,
+          "sha256": "d5a59b41248c203b8128cffb672ffac3e4771ca29451d6f856b09d52a5248c5a"
+        },
+        {
+          "path": "src/assets/blog-placeholder-4.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-4.jpg",
+          "git_blob": "f4fc88e293c2d70d1b193101df252bf45ca57760",
+          "bytes": 38690,
+          "sha256": "e0f9cc7783a492107b62fa155b504aee292001828ea86f2df59148cecd79f4b1"
+        },
+        {
+          "path": "src/assets/blog-placeholder-5.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-5.jpg",
+          "git_blob": "c5646746c08c6521843002a7491abebe6ccdf6d9",
+          "bytes": 34890,
+          "sha256": "9e674b8cfe3e5e64b0c6c14bc46666f44755ee04888b7d6d3c31bcb54ba32d72"
+        },
+        {
+          "path": "src/assets/blog-placeholder-about.jpg",
+          "upstream_path": "examples/blog/src/assets/blog-placeholder-about.jpg",
+          "git_blob": "cf5f68532f3ec832627250e7cc25c71cb034b263",
+          "bytes": 21606,
+          "sha256": "f05b2dbff18b181e3cdd494f1370b8e0c8e13a5c34400b0c5d181af7d45029f9"
+        },
+        {
+          "path": "src/assets/fonts/atkinson-bold.woff",
+          "upstream_path": "examples/blog/src/assets/fonts/atkinson-bold.woff",
+          "git_blob": "e7f8977eca89348892bc93330dc44763d2bcb5ed",
+          "bytes": 23780,
+          "sha256": "f0de8ccb0af6e50fd1b51d50d5032c6824adc0f1b435345919fca1d9b72b3623"
+        },
+        {
+          "path": "src/assets/fonts/atkinson-regular.woff",
+          "upstream_path": "examples/blog/src/assets/fonts/atkinson-regular.woff",
+          "git_blob": "bbe09c5843e554b1f763c5df8e4dfcb2b151a445",
+          "bytes": 22792,
+          "sha256": "b51d2e16226a56e304ab9ba67d22f504afc5bdceab1caefe386063a26ee4bc0b"
+        },
+        {
+          "path": "src/components/BaseHead.astro",
+          "upstream_path": "examples/blog/src/components/BaseHead.astro",
+          "git_blob": "86d1ece85cc1dfc8b477a365d2d1087851c00580",
+          "bytes": 1584,
+          "sha256": "5092f702ae07bf368b4f9a117ec227facad67482e08f1ccc84cf0e96c29e6914"
+        },
+        {
+          "path": "src/components/Footer.astro",
+          "upstream_path": "examples/blog/src/components/Footer.astro",
+          "git_blob": "96c2fce912081e5a31ada035b340efb69721be74",
+          "bytes": 3349,
+          "sha256": "b3da2f8e5c5f52eb3a66924fa194af9be1f0f16f70fdc4809205ac3629ea9161"
+        },
+        {
+          "path": "src/components/FormattedDate.astro",
+          "upstream_path": "examples/blog/src/components/FormattedDate.astro",
+          "git_blob": "1bcce73a2b6735eaae7bd135057b85275b999743",
+          "bytes": 224,
+          "sha256": "3a7e8f80a5b38c918862754b2d1370c9baf70a9e2fab5ee6af58d8013ca20e0d"
+        },
+        {
+          "path": "src/components/Header.astro",
+          "upstream_path": "examples/blog/src/components/Header.astro",
+          "git_blob": "fe2906c2f6ed1838f4f1c03aa0be19743657b722",
+          "bytes": 3734,
+          "sha256": "40898f34b72a98e65c7b52a3c994e9dedd9a7652fb4c4fc75feb76f0f796abee"
+        },
+        {
+          "path": "src/components/HeaderLink.astro",
+          "upstream_path": "examples/blog/src/components/HeaderLink.astro",
+          "git_blob": "41da8462e8e3f7f4cf4cb9ce8bc0aba253910673",
+          "bytes": 579,
+          "sha256": "885f9b2a0fa4d0ea85696b94124a0141c0501edc798a0b6896058d211e1e1a1a"
+        },
+        {
+          "path": "src/consts.ts",
+          "upstream_path": "examples/blog/src/consts.ts",
+          "git_blob": "0df8a61f4cf7fdb0dc8c67593a24c46032e0d1f7",
+          "bytes": 224,
+          "sha256": "55ee7bf9dd7fa82f010b2f42e64b795c64953b1678a2ec43324f58549a712101"
+        },
+        {
+          "path": "src/content.config.ts",
+          "upstream_path": "examples/blog/src/content.config.ts",
+          "git_blob": "1f06368cb7b7ae671189da627d53a8ceeb2d2d44",
+          "bytes": 618,
+          "sha256": "923399314447e62a3250e753ade14620919ef0cb5c67da986b8ca9ab690b0aa9"
+        },
+        {
+          "path": "src/content/blog/first-post.md",
+          "upstream_path": "examples/blog/src/content/blog/first-post.md",
+          "git_blob": "cb457dcb3f043f0ab713ecc63ffc201d5632fda1",
+          "bytes": 3455,
+          "sha256": "979f37df9c18cf711a6d28a08cff3456f30e3959d84b36b88a257e94f518f75a"
+        },
+        {
+          "path": "src/content/blog/markdown-style-guide.md",
+          "upstream_path": "examples/blog/src/content/blog/markdown-style-guide.md",
+          "git_blob": "b7a4c9ea13fbba9c06621c437f42650fb67002c0",
+          "bytes": 4768,
+          "sha256": "1376ae71bab721d74be3d1223985590a9dd053f94fa6eaec886d1dbe3b0cdd74"
+        },
+        {
+          "path": "src/content/blog/second-post.md",
+          "upstream_path": "examples/blog/src/content/blog/second-post.md",
+          "git_blob": "79337d41383eabc15f7ff7b5a052f149bb10a99e",
+          "bytes": 3456,
+          "sha256": "e023ea79fbfb91b8dc244e574ced2a799721076b1bef958a339147032aa6ce0b"
+        },
+        {
+          "path": "src/content/blog/third-post.md",
+          "upstream_path": "examples/blog/src/content/blog/third-post.md",
+          "git_blob": "b871fa15bce73467c3f1fbb88d3eb8f973d8cc18",
+          "bytes": 3455,
+          "sha256": "adbacc139e351b3dd44684199700c919424caa58a88285e87158eec222ebcf44"
+        },
+        {
+          "path": "src/content/blog/using-mdx.mdx",
+          "upstream_path": "examples/blog/src/content/blog/using-mdx.mdx",
+          "git_blob": "7ab9681bd6f7659d28b87a953e083b772f070fdf",
+          "bytes": 1592,
+          "sha256": "e6c0145ac306d3a4809ede260c6a4727f66e4c63db4a8d5ec6bc7283e526941c"
+        },
+        {
+          "path": "src/layouts/BlogPost.astro",
+          "upstream_path": "examples/blog/src/layouts/BlogPost.astro",
+          "git_blob": "2c79f3bbfe4cba9b5443f8d3c3dcfc416635500f",
+          "bytes": 1793,
+          "sha256": "36fa9b49199789d7b06aa7b008fa9d2cad941520cc796bc71c1c39a763fc49b8"
+        },
+        {
+          "path": "src/pages/about.astro",
+          "upstream_path": "examples/blog/src/pages/about.astro",
+          "git_blob": "86c7499ed1d8b65ec74b341f3d18f829031be26e",
+          "bytes": 3711,
+          "sha256": "fb5ca6717be0f5f77aa025e8fe7e93f03a1c6e04cedcdb82d19f531d7c22cfd7"
+        },
+        {
+          "path": "src/pages/blog/[...slug].astro",
+          "upstream_path": "examples/blog/src/pages/blog/[...slug].astro",
+          "git_blob": "0754ea7be6a8c91c163a47e62c9f8c5d06e7cad5",
+          "bytes": 464,
+          "sha256": "f16ad285a1c9542449f322eaa833d2b5f1d96ceb4e3ce18a73053435cb14e49d"
+        },
+        {
+          "path": "src/pages/blog/index.astro",
+          "upstream_path": "examples/blog/src/pages/blog/index.astro",
+          "git_blob": "5b08c9f16ea69035d11d887ad22d1304de922f4b",
+          "bytes": 2264,
+          "sha256": "bfec5b69ad6faca22e062a4c565bc880d187bf6dc6d0ec607ea21ec9e1729d89"
+        },
+        {
+          "path": "src/pages/index.astro",
+          "upstream_path": "examples/blog/src/pages/index.astro",
+          "git_blob": "c8963c483b59ffee9a282089bc9f2c13b4694eb5",
+          "bytes": 1967,
+          "sha256": "3d75085ed099ef3bdb463c010effd312a3903b2f5710584534a90960b8b77014"
+        },
+        {
+          "path": "src/pages/rss.xml.js",
+          "upstream_path": "examples/blog/src/pages/rss.xml.js",
+          "git_blob": "1fa2b184bbaff477ce599c5f0eb444029fa2dea2",
+          "bytes": 402,
+          "sha256": "e9e664174a1426248d232eac9f1685daeec526d2230bebfe119ec6f5778eb19f"
+        },
+        {
+          "path": "src/styles/global.css",
+          "upstream_path": "examples/blog/src/styles/global.css",
+          "git_blob": "8d0e05ff446e2eb4bd93f54661e046226f156427",
+          "bytes": 2590,
+          "sha256": "e19a8b50c54fe38bccafcc569c9c80b2d6aec85af066ef802cbfcb439d3a2fd5"
+        },
+        {
+          "path": "tsconfig.json",
+          "upstream_path": "examples/blog/tsconfig.json",
+          "git_blob": "0dc098dd7eaaa2de4938c719e71981b193087a1f",
+          "bytes": 166,
+          "sha256": "9563cef985ee6405d12c3e8e942c6f01fbebd8f94398169cccb563c6823eded4"
+        }
+      ]
+    }
+  ]
+}
