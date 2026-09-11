@@ -45,6 +45,22 @@ def package(environment):
     archive.with_name(archive.name + ".sha256").write_text(f"{checksum}  {archive.name}\n")
 
 
+def ci_package(environment):
+    """Package a native CI build for local Action tests, without release writes."""
+    key = bundle.platform_key()
+    if environment.get("REDFLAG_PLATFORM", key) != key:
+        raise ValueError("CI runner does not match its declared native platform")
+    target = bundle.PLATFORMS[key]["target"]
+    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target]))
+    target_directory = Path(metadata["target_directory"])
+    redflag_name, engine_name = bundle.executable_names(key)
+    archive = Path(environment["RUNNER_TEMP"]) / "redflag-ci.tar.gz"
+    checksum = bundle.make_bundle(target_directory / "release" / redflag_name,
+        target_directory / "debug" / engine_name, key, environment["GITHUB_SHA"], metadata, archive)
+    with Path(environment["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        output.write(f"bundle={archive}\nsha256={checksum}\n")
+
+
 def test(environment):
     _, _, key, directory = release_context(environment)
     archive = directory / bundle.archive_name(key)
@@ -82,12 +98,12 @@ def publish(environment):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("validate", "package", "test", "publish"))
+    parser.add_argument("operation", choices=("validate", "ci-package", "package", "test", "publish"))
     args = parser.parse_args()
     try:
         if args.operation == "validate":
             release_context(os.environ)
         else:
-            {"package": package, "test": test, "publish": publish}[args.operation](os.environ)
+            {"ci-package": ci_package, "package": package, "test": test, "publish": publish}[args.operation](os.environ)
     except (OSError, EOFError, ValueError, KeyError, TypeError, tarfile.TarError, subprocess.SubprocessError) as error:
         parser.exit(2, f"Release workflow failed: {error}\n")

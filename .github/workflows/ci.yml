@@ -27,6 +27,7 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
       - name: Verify installers and Action scope routing
         run: |
+          python3 -m py_compile scripts/*.py
           python3 scripts/test_install_engine.py
           python3 scripts/test_release_bundle.py
           python3 scripts/test_action.py
@@ -38,22 +39,63 @@ jobs:
       - name: Package current build for Action integration
         id: bundle
         shell: bash
-        run: |
-          set -euo pipefail
-          cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/redflag-metadata.json"
-          python3 scripts/release_bundle.py build \
-            --binary target/release/redflag --engine target/debug/engines/betterleaks \
-            --platform linux_x64 --source-commit "$GITHUB_SHA" \
-            --metadata "$RUNNER_TEMP/redflag-metadata.json" \
-            --output "$RUNNER_TEMP/redflag-ci.tar.gz" > "$RUNNER_TEMP/redflag-ci.sha256"
-          read -r redflag_checksum redflag_asset < "$RUNNER_TEMP/redflag-ci.sha256"
-          printf 'bundle=%s\nsha256=%s\n' "$RUNNER_TEMP/redflag-ci.tar.gz" "$redflag_checksum" >> "$GITHUB_OUTPUT"
+        run: python3 scripts/release_ci.py ci-package
       - name: Exercise installed Action modes against real inputs
         env:
           REDFLAG_TEST_BUNDLE: ${{ steps.bundle.outputs.bundle }}
           REDFLAG_TEST_SHA256: ${{ steps.bundle.outputs.sha256 }}
         run: python3 scripts/test_action_integration.py
       - name: Self-scan with the verified local bundle
+        uses: ./
+        with:
+          bundle: ${{ steps.bundle.outputs.bundle }}
+          bundle-sha256: ${{ steps.bundle.outputs.sha256 }}
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows_x64
+            runner: windows-2025
+          - platform: darwin_x64
+            runner: macos-15-intel
+          - platform: darwin_arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      REDFLAG_PLATFORM: ${{ matrix.platform }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.1
+      - name: Verify native installers and Action routing
+        run: |
+          python3 -m py_compile scripts/*.py
+          python3 scripts/test_install_engine.py
+          python3 scripts/test_release_bundle.py
+          python3 scripts/test_action.py
+          python3 scripts/test_release_ci.py
+      - name: Install pinned native engine
+        run: python3 scripts/install_engine.py --directory target/debug/engines
+      - run: cargo test --locked --all-targets -- --include-ignored
+      - run: cargo build --locked --release
+      - name: Package the native build
+        id: bundle
+        run: python3 scripts/release_ci.py ci-package
+      - name: Exercise the installed Action
+        env:
+          REDFLAG_TEST_BUNDLE: ${{ steps.bundle.outputs.bundle }}
+          REDFLAG_TEST_SHA256: ${{ steps.bundle.outputs.sha256 }}
+        run: python3 scripts/test_action_integration.py
+      - name: Self-scan with the verified native bundle
         uses: ./
         with:
           bundle: ${{ steps.bundle.outputs.bundle }}

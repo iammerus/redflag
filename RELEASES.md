@@ -108,6 +108,12 @@ The policy uses the documented [`gh attestation verify` options](https://cli.git
 
 ## Hosted build and publication gates
 
+Ordinary branch/PR CI also builds and tests all four native platforms, packages the
+current checkout and runs the installed Action. It uses local trusted bundles and
+does not publish a release. This lets maintainers inspect native compatibility
+before approving a version tag. The Linux `test` job retains its existing name;
+the other platforms have separate `native` matrix checks.
+
 `.github/workflows/release.yml` runs only for version tags. It calls CI, builds
 each platform natively with Rust 1.98.1, runs native tests and real Action integration
 checks, then attests and uploads each complete bundle. Platforms/runners must match
