@@ -1,103 +1,102 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          profile: minimal
-          toolchain: stable
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.1
           components: rustfmt, clippy
       - run: cargo fmt -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
-      - run: cargo build --release
-      - name: Self-scan with Redflag action
-        uses: ./
-      - name: Verify release tag
-        if: startsWith(github.ref, 'refs/tags/')
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Validate GitHub workflows and local Action metadata
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+      - name: Verify installers and Action scope routing
         run: |
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "redflag") | .version')"
-          test "${GITHUB_REF_NAME}" = "v${package_version}"
-
-  release-linux:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+          python3 -m py_compile scripts/*.py
+          python3 scripts/test_install_engine.py
+          python3 scripts/test_release_bundle.py
+          python3 scripts/test_action.py
+          python3 scripts/test_release_ci.py
+      - name: Install pinned engine for integration tests
+        run: python3 scripts/install_engine.py --directory target/debug/engines
+      - run: cargo test --locked --all-targets -- --include-ignored
+      - run: cargo build --locked --release
+      - name: Package current build for Action integration
+        id: bundle
+        shell: bash
+        run: python3 scripts/release_ci.py ci-package
+      - name: Exercise installed Action modes against real inputs
+        env:
+          REDFLAG_TEST_BUNDLE: ${{ steps.bundle.outputs.bundle }}
+          REDFLAG_TEST_SHA256: ${{ steps.bundle.outputs.sha256 }}
+        run: python3 scripts/test_action_integration.py
+      - name: Self-scan with the verified local bundle
+        uses: ./
+        with:
+          bundle: ${{ steps.bundle.outputs.bundle }}
+          bundle-sha256: ${{ steps.bundle.outputs.sha256 }}
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows_x64
+            runner: windows-2025
+          - platform: darwin_x64
+            runner: macos-15-intel
+          - platform: darwin_arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      REDFLAG_PLATFORM: ${{ matrix.platform }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cross
-      - run: cross build --release --target x86_64-unknown-linux-gnu
-      - run: mkdir -p dist
-      - run: cp target/x86_64-unknown-linux-gnu/release/redflag dist/redflag-linux
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          name: linux-binary
-          path: dist/redflag-linux
-
-  release-windows:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cross
-      - run: cross build --release --target x86_64-pc-windows-gnu
-      - run: mkdir -p dist
-      - run: cp target/x86_64-pc-windows-gnu/release/redflag.exe dist/redflag-windows.exe
-      - uses: actions/upload-artifact@v4
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          name: windows-binary
-          path: dist/redflag-windows.exe
-
-  release-macos:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+          toolchain: 1.98.1
+      - name: Verify native installers and Action routing
+        run: |
+          python3 -m py_compile scripts/*.py
+          python3 scripts/test_install_engine.py
+          python3 scripts/test_release_bundle.py
+          python3 scripts/test_action.py
+          python3 scripts/test_release_ci.py
+      - name: Install pinned native engine
+        run: python3 scripts/install_engine.py --directory target/debug/engines
+      - run: cargo test --locked --all-targets -- --include-ignored
+      - run: cargo build --locked --release
+      - name: Package the native build
+        id: bundle
+        run: python3 scripts/release_ci.py ci-package
+      - name: Exercise the installed Action
+        env:
+          REDFLAG_TEST_BUNDLE: ${{ steps.bundle.outputs.bundle }}
+          REDFLAG_TEST_SHA256: ${{ steps.bundle.outputs.sha256 }}
+        run: python3 scripts/test_action_integration.py
+      - name: Self-scan with the verified native bundle
+        uses: ./
         with:
-          profile: minimal
-          toolchain: stable
-          targets: x86_64-apple-darwin
-      - run: rustup target add x86_64-apple-darwin
-      - run: cargo build --release --target x86_64-apple-darwin
-      - run: mkdir -p dist
-      - run: cp target/x86_64-apple-darwin/release/redflag dist/redflag-macos
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-binary
-          path: dist/redflag-macos
-
-  create-release:
-    needs: [release-linux, release-windows, release-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
-          path: artifacts
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-binary
-          path: artifacts
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-binary
-          path: artifacts
-      - uses: softprops/action-gh-release@v1
-        with:
-          name: ${{ github.ref_name }}
-          files: |
-            artifacts/redflag-linux
-            artifacts/redflag-windows.exe
-            artifacts/redflag-macos
+          bundle: ${{ steps.bundle.outputs.bundle }}
+          bundle-sha256: ${{ steps.bundle.outputs.sha256 }}

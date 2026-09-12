@@ -318,6 +318,60 @@ fn invalid_config_is_an_error() {
 }
 
 #[test]
+fn repeated_exclusions_preserve_the_last_policy() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("assets/secret.rs"));
+    write_secret(&dir.path().join("node_modules/secret.rs"));
+    let config = dir.path().join("redflag.toml");
+    for (glob, policies, expected) in [
+        (
+            "**/assets/**",
+            ["ScanButAllow", "Ignore", "ScanButAllow"],
+            1,
+        ),
+        ("**/assets/**", ["Ignore", "ScanButAllow", "Ignore"], 0),
+        (
+            "**/node_modules/**",
+            ["ScanButAllow", "Ignore", "ScanButAllow"],
+            1,
+        ),
+    ] {
+        // Restrict the target so the other fixture cannot conceal a missed rule.
+        let target = if glob.contains("node_modules") {
+            dir.path().join("node_modules/secret.rs")
+        } else {
+            dir.path().join("assets/secret.rs")
+        };
+        let other = if glob.contains("node_modules") {
+            "**/assets/**"
+        } else {
+            "**/node_modules/**"
+        };
+        let mut contents = format!("[[exclusions]]\npattern = \"{other}\"\npolicy = \"Ignore\"\n");
+        for policy in policies {
+            contents.push_str(&format!(
+                "[[exclusions]]\npattern = \"{glob}\"\npolicy = \"{policy}\"\n"
+            ));
+        }
+        fs::write(&config, contents).unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(output.status.code(), Some(expected));
+        let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(findings.as_array().unwrap().len(), expected as usize);
+        if expected == 1 {
+            assert_eq!(Path::new(findings[0]["file"].as_str().unwrap()), target);
+        }
+    }
+}
+
+#[test]
 fn history_defaults_to_head_on_trunk() {
     let dir = trunk_repo_with_deleted_secret();
     let output = redflag_with_args(&[
@@ -331,6 +385,460 @@ fn history_defaults_to_head_on_trunk() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(!findings.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn history_limits_fail_before_emitting_results() {
+    let dir = trunk_repo_with_deleted_secret();
+    for format in ["json", "json-report"] {
+        for (limit, expected) in [(1, 2), (2, 1), (3, 1)] {
+            let output = redflag_with_args(&[
+                "scan",
+                dir.path().to_str().unwrap(),
+                "--git-history",
+                "--git-max-depth",
+                &limit.to_string(),
+                "--format",
+                format,
+            ]);
+            assert_eq!(output.status.code(), Some(expected));
+            if expected == 2 {
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8_lossy(&output.stderr).contains("exceeds"));
+            }
+        }
+    }
+}
+
+#[test]
+fn shallow_history_is_an_operational_failure() {
+    let dir = trunk_repo_with_deleted_secret();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head().unwrap().target().unwrap();
+    // Git's shallow boundary must be respected even when older objects happen
+    // to remain locally (for example, after a partial fetch).
+    fs::write(repo.path().join("shallow"), format!("{head}\n")).unwrap();
+    drop(repo);
+    for format in ["json", "json-report"] {
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--format",
+            format,
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("shallow"));
+    }
+}
+
+#[test]
+fn versioned_legacy_report_retains_exact_scope_and_array_compatibility() {
+    let dir = trunk_repo_with_deleted_secret();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    let first = head.parent(0).unwrap();
+    let signature = Signature::now("Test User", "test@example.com").unwrap();
+    repo.tag(
+        "audit",
+        first.as_object(),
+        &signature,
+        "Reviewed tip",
+        false,
+    )
+    .unwrap();
+    let run = |format| {
+        redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--no-config",
+            "--git-branches",
+            "HEAD,audit",
+            "--format",
+            format,
+            "--no-progress",
+        ])
+    };
+    let result = run("json-report");
+    assert_eq!(result.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["mode"], "scan");
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["coverage"]["engine"], "redflag-native");
+    let scope = &report["coverage"]["history_scope"];
+    assert_eq!(scope["reachable_commits"], 2);
+    assert_eq!(scope["omitted_by_date"], 0);
+    assert_eq!(scope["shallow"], false);
+    assert_eq!(scope["truncated"], false);
+    assert_eq!(
+        scope["tips"],
+        serde_json::json!([
+            {"revision":"HEAD", "commit":head.id().to_string()},
+            {"revision":"audit", "commit":first.id().to_string()},
+        ])
+    );
+    assert_eq!(
+        scope["selected_commits"],
+        serde_json::json!([head.id().to_string(), first.id().to_string()])
+    );
+    assert_eq!(report["coverage"]["history"]["commits"], 2);
+    assert_eq!(report["coverage"]["working_tree"]["findings"], 0);
+    let legacy: serde_json::Value = serde_json::from_slice(&run("json").stdout).unwrap();
+    assert_eq!(report["findings"], legacy);
+    assert!(!String::from_utf8_lossy(&result.stdout).contains(&synthetic_secret()));
+    let text = String::from_utf8(run("text").stdout).unwrap();
+    assert!(text.contains("2 of 2 reachable commits selected; 0 omitted by date"));
+    assert!(text.contains(&format!("Revision audit -> {}", first.id())));
+    assert!(text.contains("relative to first parent"));
+}
+
+#[test]
+fn history_report_identifies_inclusive_date_selection_and_empty_scopes() {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let mut ids = Vec::new();
+    for (index, timestamp) in [
+        "2025-01-01T23:59:59Z",
+        "2025-01-02T00:00:00Z",
+        "2025-01-02T23:59:59Z",
+        "2025-01-03T00:00:00Z",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let seconds = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .timestamp();
+        let signature = Signature::new(
+            "Test User",
+            "test@example.com",
+            &git2::Time::new(seconds, 0),
+        )
+        .unwrap();
+        let file = dir.path().join("config.env");
+        if index == 1 {
+            write_secret(&file);
+        } else {
+            fs::write(&file, "PUBLIC_SETTING=enabled\n").unwrap();
+        }
+        let mut git_index = repo.index().unwrap();
+        git_index.add_path(Path::new("config.env")).unwrap();
+        let tree_id = git_index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parents: Vec<_> = ids
+            .last()
+            .map(|id| repo.find_commit(*id).unwrap())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<_> = parents.iter().collect();
+        ids.push(
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Scope fixture",
+                &tree,
+                &parent_refs,
+            )
+            .unwrap(),
+        );
+    }
+    for (day, expected, selected) in [
+        (
+            "2025-01-02",
+            1,
+            vec![ids[2].to_string(), ids[1].to_string()],
+        ),
+        ("2025-01-04", 0, vec![]),
+    ] {
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--no-config",
+            "--git-history",
+            "--git-since",
+            day,
+            "--git-until",
+            day,
+            "--format",
+            "json-report",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let scope = &report["coverage"]["history_scope"];
+        assert_eq!(scope["reachable_commits"], 4);
+        assert_eq!(scope["selected_commits"], serde_json::json!(selected));
+        assert_eq!(scope["omitted_by_date"], 4 - selected.len());
+        assert_eq!(
+            scope["until"].as_i64().unwrap() - scope["since"].as_i64().unwrap(),
+            86399
+        );
+        assert_eq!(report["complete"], true);
+    }
+    // Date filters do not turn the traversal safety limit into silent truncation.
+    let incomplete = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--no-config",
+        "--git-history",
+        "--git-since",
+        "2099-01-01",
+        "--git-max-depth",
+        "1",
+        "--format",
+        "json-report",
+    ]);
+    assert_eq!(incomplete.status.code(), Some(2));
+    assert!(incomplete.stdout.is_empty());
+}
+
+#[test]
+fn working_tree_report_records_policy_without_inventing_history_coverage() {
+    let dir = tempdir().unwrap();
+    write_secret(&dir.path().join("secret.rs"));
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--no-config",
+        "--format",
+        "json-report",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let config = redflag_with_args(&[
+        "show-config",
+        dir.path().to_str().unwrap(),
+        "--no-config",
+        "--format",
+        "json",
+    ]);
+    let config: serde_json::Value = serde_json::from_slice(&config.stdout).unwrap();
+    assert_eq!(report["coverage"]["config_sha256"], config["sha256"]);
+    assert_eq!(
+        report["coverage"]["exclusions"],
+        config["effective"]["exclusions"]
+    );
+    assert_eq!(
+        report["coverage"]["extensions"],
+        config["effective"]["extensions"]
+    );
+    assert_eq!(
+        report["coverage"]["target"],
+        fs::canonicalize(dir.path()).unwrap().to_str().unwrap()
+    );
+    assert_eq!(report["coverage"]["working_tree"]["files"], 1);
+    assert!(report["coverage"]["history"].is_null());
+    assert!(report["coverage"]["history_scope"].is_null());
+}
+
+#[test]
+fn binary_classification_cannot_hide_history_content() {
+    for (folder, prefix, expected) in [("app", 0u8, 1), ("app", 255u8, 2), ("vendor", 255u8, 0)] {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        let path = Path::new(folder).join("secret.js");
+        fs::create_dir_all(dir.path().join(folder)).unwrap();
+        let mut bytes = vec![prefix];
+        bytes.extend_from_slice(format!("api_key = \"{}\"\n", synthetic_secret()).as_bytes());
+        fs::write(dir.path().join(&path), bytes).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(&path).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let first = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Add fixture",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        fs::remove_file(dir.path().join(&path)).unwrap();
+        index.remove_path(&path).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(first).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Remove fixture",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            dir.path().to_str().unwrap(),
+            "--git-history",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if expected == 2 {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("not UTF-8"));
+        } else {
+            let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(findings.as_array().unwrap().len(), expected as usize);
+            if expected == 1 {
+                assert_eq!(findings[0]["commit_hash"], first.to_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn streaming_input_limits_fail_without_partial_json() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("input.env");
+    let config = dir.path().join("redflag.toml");
+    fs::write(&config, "[limits]\nmax_line_bytes = 80\n").unwrap();
+    let first = format!("api_key=\"{}\"\n", synthetic_secret());
+    for (length, ending, expected) in [(80, "\n", 1), (80, "\r\n", 1), (81, "", 2)] {
+        fs::write(&file, format!("{first}{}{ending}", "a".repeat(length))).unwrap();
+        let output = redflag_with_args(&[
+            "scan",
+            file.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(output.status.code(), Some(expected));
+        if expected == 2 {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("line limit"));
+        } else {
+            let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(findings.as_array().unwrap().len(), 1);
+        }
+    }
+    // Invalid text after a finding must also leave the final report unpublished.
+    let mut invalid = first.into_bytes();
+    invalid.push(255);
+    fs::write(&file, invalid).unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        file.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn file_and_discovery_limits_are_operational_failures() {
+    let dir = tempdir().unwrap();
+    let settings = tempdir().unwrap();
+    let config = settings.path().join("redflag.toml");
+    fs::write(&config, "[limits]\nmax_file_bytes = 10\nmax_files = 2\n").unwrap();
+    let file = dir.path().join("large.txt");
+    fs::write(&file, "a\n".repeat(6)).unwrap();
+    let arguments = |path: &Path| {
+        redflag_with_args(&[
+            "scan",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+    };
+    let output = arguments(&file);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("file limit"));
+    fs::remove_file(file).unwrap();
+    for index in 0..3 {
+        fs::write(dir.path().join(format!("file-{index}.txt")), "safe").unwrap();
+    }
+    let output = arguments(dir.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("2-file limit"));
+    let history = trunk_repo_with_deleted_secret();
+    let output = redflag_with_args(&[
+        "scan",
+        history.path().to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("secret.rs exceeds"));
+}
+
+#[test]
+fn history_preserves_template_context_before_diff_hunks() {
+    let dir = tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let signature = Signature::now("Test User", "test@example.com").unwrap();
+    let path = dir.path().join("template.js");
+    let prefix = format!("const template = `\n{}", "ordinary text\n".repeat(20));
+    fs::write(&path, format!("{prefix}old text\n`;\n")).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("template.js")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let first = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Start template",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let marker = ["// redflag-", "ignore example"].concat();
+    let token = ["ghp_", "aB3dE6gH9jK2mN5p", "Q8sT1vW4xY7zA0cD3fG6"].concat();
+    fs::write(&path, format!("{prefix}{marker} {token}\n`;\n")).unwrap();
+    index.add_path(Path::new("template.js")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = repo.find_commit(first).unwrap();
+    let second = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Add literal",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+    let output = redflag_with_args(&[
+        "scan",
+        dir.path().to_str().unwrap(),
+        "--git-history",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(findings.as_array().unwrap().len(), 2);
+    assert_eq!(findings[1]["commit_hash"], second.to_string());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
 }
 
 #[test]
@@ -373,18 +881,21 @@ fn git_options_require_history_scanning() {
 fn closed_output_pipe_is_an_error() {
     let dir = tempdir().unwrap();
     write_secret(&dir.path().join(".env"));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_redflag"))
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_redflag"))
         .args(["scan", dir.path().to_str().unwrap()])
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Broken pipe"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .to_lowercase()
+        .contains("pipe"));
 }
 
 #[test]
@@ -435,7 +946,7 @@ fn default_exclusions_keep_secret_bearing_configuration() {
     ] {
         assert!(findings
             .iter()
-            .any(|finding| finding["file"].as_str().unwrap().ends_with(path)));
+            .any(|finding| Path::new(finding["file"].as_str().unwrap()).ends_with(path)));
     }
     assert!(!findings.iter().any(|finding| {
         finding["file"]
@@ -574,10 +1085,10 @@ policy = "ScanButAllow"
     let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
 
     assert_eq!(findings.len(), 1);
-    assert!(findings[0]["file"]
-        .as_str()
-        .unwrap()
-        .contains("private/allowed/secret.rs"));
+    assert_eq!(
+        Path::new(findings[0]["file"].as_str().unwrap()),
+        dir.path().join("private/allowed/secret.rs")
+    );
 }
 
 #[test]

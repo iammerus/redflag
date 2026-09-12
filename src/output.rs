@@ -1,11 +1,13 @@
 use crate::{
     config::Severity,
     error::RedflagError,
+    git_scanner::HistoryScope,
     scanner::{Finding, FindingHandler, ScanProgress, ScanStats},
 };
 use std::{
     collections::HashMap,
-    io::{self, IsTerminal, Write},
+    fs::File,
+    io::{self, BufWriter, IsTerminal, Seek, SeekFrom, Write},
     time::{Duration, Instant},
 };
 
@@ -19,11 +21,28 @@ pub enum OutputFormat {
     Json,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq)]
+pub(crate) enum ScanFormat {
+    Text,
+    Json,
+    /// Versioned JSON with selected history scope and effective policy identity
+    JsonReport,
+}
+
+impl ScanFormat {
+    pub fn output(self) -> OutputFormat {
+        match self {
+            Self::Text => OutputFormat::Text,
+            Self::Json | Self::JsonReport => OutputFormat::Json,
+        }
+    }
+}
+
 pub struct OutputHandler {
     format: OutputFormat,
     findings_count: usize,
     writer: Box<dyn Write>,
-    json_findings: Vec<Finding>,
+    json_spool: Option<BufWriter<File>>,
     findings_by_severity: HashMap<Severity, usize>,
     progress_writer: Box<dyn Write>,
     progress_enabled: bool,
@@ -60,7 +79,7 @@ impl OutputHandler {
             format,
             findings_count: 0,
             writer,
-            json_findings: Vec::new(),
+            json_spool: None,
             findings_by_severity: HashMap::new(),
             progress_writer,
             progress_enabled,
@@ -192,8 +211,15 @@ impl OutputHandler {
         self.clear_progress();
         match self.format {
             OutputFormat::Json => {
-                serde_json::to_writer_pretty(&mut self.writer, &self.json_findings)?;
-                writeln!(self.writer)?;
+                if let Some(spool) = &mut self.json_spool {
+                    spool.flush()?;
+                    spool.seek(SeekFrom::Start(0))?;
+                    self.writer.write_all(b"[\n")?;
+                    io::copy(spool.get_mut(), &mut self.writer)?;
+                    self.writer.write_all(b"\n]\n")?;
+                } else {
+                    self.writer.write_all(b"[]\n")?;
+                }
             }
             OutputFormat::Text => {
                 if self.findings_count == 0 {
@@ -259,6 +285,86 @@ impl OutputHandler {
         self.findings_count
     }
 
+    pub(crate) fn history_scope(&mut self, scope: &HistoryScope) -> Result<(), RedflagError> {
+        if matches!(self.format, OutputFormat::Text) {
+            writeln!(self.writer, "History scope: {} of {} reachable commits selected; {} omitted by date; complete, not truncated.", scope.selected_commits.len(), scope.reachable_commits, scope.omitted_by_date)?;
+            for tip in &scope.tips {
+                writeln!(
+                    self.writer,
+                    "  Revision {} -> {}",
+                    tip.revision.escape_debug(),
+                    tip.commit
+                )?;
+            }
+            let date = |timestamp: Option<i64>| {
+                timestamp
+                    .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_else(|| "unbounded".into())
+            };
+            writeln!(
+                self.writer,
+                "  Commit time (UTC, inclusive): {} through {}",
+                date(scope.since),
+                date(scope.until)
+            )?;
+            writeln!(self.writer, "  Comparison: {}", scope.comparison)?;
+            self.writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Versioned reports retain the disk spool used by the legacy source array.
+    pub fn finish_report(
+        &mut self,
+        mode: &str,
+        coverage: &impl serde::Serialize,
+    ) -> Result<(), RedflagError> {
+        self.clear_progress();
+        #[derive(serde::Serialize)]
+        struct Header<'a, T> {
+            schema_version: u32,
+            mode: &'a str,
+            complete: bool,
+            scanner_version: &'static str,
+            findings_count: usize,
+            coverage: &'a T,
+        }
+        let header = Header {
+            schema_version: 1,
+            mode,
+            complete: true,
+            scanner_version: env!("CARGO_PKG_VERSION"),
+            findings_count: self.findings_count,
+            coverage,
+        };
+        match self.format {
+            OutputFormat::Json => {
+                let mut bytes = serde_json::to_vec(&header)?;
+                bytes.pop(); // Replace the final object delimiter with findings.
+                if let Some(spool) = &mut self.json_spool {
+                    spool.flush()?;
+                    spool.seek(SeekFrom::Start(0))?;
+                }
+                self.writer.write_all(&bytes)?;
+                self.writer.write_all(b",\"findings\":[\n")?;
+                if let Some(spool) = &mut self.json_spool {
+                    io::copy(spool.get_mut(), &mut self.writer)?;
+                }
+                self.writer.write_all(b"\n]}\n")?;
+            }
+            OutputFormat::Text => {
+                writeln!(
+                    self.writer,
+                    "{mode} inspection complete: {} findings.",
+                    self.findings_count
+                )?;
+            }
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+
     fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
         if count == 1 {
             singular
@@ -269,6 +375,16 @@ impl OutputHandler {
 }
 
 impl FindingHandler for OutputHandler {
+    fn warning(&mut self, finding: Finding) -> Result<(), RedflagError> {
+        self.clear_rendered_progress();
+        writeln!(
+            self.progress_writer,
+            "WARNING: Potential secret found but allowed: {finding:?}"
+        )?;
+        self.draw_progress(true);
+        Ok(())
+    }
+
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError> {
         let severity = finding.severity;
         match self.format {
@@ -292,7 +408,17 @@ impl FindingHandler for OutputHandler {
                 }
             }
             OutputFormat::Json => {
-                self.json_findings.push(finding);
+                // An anonymous private temporary file bounds report memory and
+                // leaves stdout empty if scanning fails before completion.
+                if self.json_spool.is_none() {
+                    self.json_spool =
+                        Some(BufWriter::with_capacity(64 * 1024, tempfile::tempfile()?));
+                }
+                let spool = self.json_spool.as_mut().expect("spool created above");
+                if self.findings_count > 0 {
+                    spool.write_all(b",\n")?;
+                }
+                serde_json::to_writer(spool, &finding)?;
             }
         }
 
@@ -362,6 +488,11 @@ mod tests {
             commit_hash: None,
             commit_author: None,
             commit_date: None,
+            evidence: Vec::new(),
+            primary: None,
+            grouping_key: None,
+            representation: Vec::new(),
+            archive: Vec::new(),
         }
     }
 

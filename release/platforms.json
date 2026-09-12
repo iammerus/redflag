@@ -1,0 +1,6 @@
+{
+  "darwin_arm64": {"target": "aarch64-apple-darwin", "runner": "macos-15"},
+  "darwin_x64": {"target": "x86_64-apple-darwin", "runner": "macos-15-intel"},
+  "linux_x64": {"target": "x86_64-unknown-linux-gnu", "runner": "ubuntu-24.04"},
+  "windows_x64": {"target": "x86_64-pc-windows-msvc", "runner": "windows-2025"}
+}

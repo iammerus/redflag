@@ -1,6 +1,6 @@
 [package]
 name = "redflag"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight secret scanner for codebases"
 license = "MIT"
@@ -17,6 +17,11 @@ serde_json = "1.0"
 chrono = "0.4"
 git2 = { version = "0.20.0", features = ["vendored-openssl"] }
 glob = "0.3"
-
-[dev-dependencies]
 tempfile = "3.3"
+aho-corasick = "1.1"
+sha2 = "0.10"
+similar = { version = "=3.2.0", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+tar = { version = "=0.4.46", default-features = false }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }

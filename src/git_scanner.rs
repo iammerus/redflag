@@ -1,5 +1,5 @@
 use crate::{
-    config::GitConfig,
+    config::{ExclusionPolicy, GitConfig},
     error::RedflagError,
     scanner::{
         CommitMetadata, ContentLine, FindingHandler, ScanProgress, ScanStats, Scanner,
@@ -7,41 +7,122 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use git2::{Commit, DiffOptions, Patch, Repository, Revwalk, Sort};
-use std::path::Path;
+use git2::{Commit, DiffOptions, Oid, Patch, Repository, Revwalk, Sort};
+use std::path::{Path, PathBuf};
 
-pub fn validate_git_scan(path: &Path, config: &GitConfig) -> Result<(), RedflagError> {
-    let repo = Repository::open(path)?;
-    let mut revwalk = repo.revwalk()?;
-    push_revisions(&repo, &mut revwalk, config)
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryScope {
+    repository: PathBuf,
+    pub tips: Vec<HistoryTip>,
+    pub reachable_commits: usize,
+    pub selected_commits: Vec<String>,
+    pub omitted_by_date: usize,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    max_commits: usize,
+    shallow: bool,
+    truncated: bool,
+    pub comparison: &'static str,
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryTip {
+    pub revision: String,
+    pub commit: String,
+}
+
+pub(crate) struct HistoryScan {
+    repo: Repository,
+    commits: Vec<Oid>,
+    scope: HistoryScope,
+}
+
+impl HistoryScan {
+    /// Resolve the complete requested history before emitting any scan results.
+    pub(crate) fn prepare(path: &Path, config: &GitConfig) -> Result<Self, RedflagError> {
+        let repo = Repository::open(path)?;
+        if repo.is_shallow() {
+            return Err(RedflagError::Incomplete(
+                "Git history is shallow. Fetch the full history (actions/checkout fetch-depth: 0) and retry."
+                    .to_string(),
+            ));
+        }
+        let mut revwalk = repo.revwalk()?;
+        let tips = push_revisions(&repo, &mut revwalk, config)?;
+        revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+        let mut commits = Vec::new();
+        let mut reachable_commits = 0;
+        for (index, oid) in revwalk.enumerate() {
+            let oid = oid?;
+            if index >= config.max_depth {
+                return Err(RedflagError::Incomplete(format!(
+                    "Git history exceeds the {}-commit limit. Increase --git-max-depth to inspect the requested history.",
+                    config.max_depth
+                )));
+            }
+            reachable_commits += 1;
+            let commit = repo.find_commit(oid)?;
+            if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
+                commits.push(oid);
+            }
+        }
+        let scope = HistoryScope {
+            repository: std::fs::canonicalize(repo.workdir().unwrap_or(repo.path()))?,
+            tips,
+            reachable_commits,
+            selected_commits: commits.iter().map(ToString::to_string).collect(),
+            omitted_by_date: reachable_commits - commits.len(),
+            since: config.since_timestamp,
+            until: config.until_timestamp,
+            max_commits: config.max_depth,
+            shallow: false,
+            truncated: false,
+            comparison: "added lines relative to first parent; root commits relative to empty tree",
+        };
+        Ok(Self {
+            repo,
+            commits,
+            scope,
+        })
+    }
+
+    pub(crate) fn scope(&self) -> &HistoryScope {
+        &self.scope
+    }
+
+    pub(crate) fn scan<H: FindingHandler>(
+        &self,
+        scanner: &Scanner,
+        handler: &mut H,
+    ) -> Result<ScanStats, RedflagError> {
+        scan_prepared_history(&self.repo, &self.commits, scanner, handler)
+    }
+}
+
+#[cfg(test)]
 pub fn scan_git_history_with_handler<H: FindingHandler>(
     path: &Path,
     scanner: &Scanner,
     config: &GitConfig,
     handler: &mut H,
 ) -> Result<ScanStats, RedflagError> {
-    let repo = Repository::open(path)?;
-    let mut revwalk = repo.revwalk()?;
-    push_revisions(&repo, &mut revwalk, config)?;
-    revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+    HistoryScan::prepare(path, config)?.scan(scanner, handler)
+}
 
+fn scan_prepared_history<H: FindingHandler>(
+    repo: &Repository,
+    commits: &[Oid],
+    scanner: &Scanner,
+    handler: &mut H,
+) -> Result<ScanStats, RedflagError> {
     handler.progress(ScanProgress::Preparing {
         phase: "Git history",
     })?;
-    let mut commits = Vec::new();
-    for oid in revwalk.take(config.max_depth) {
-        let commit = repo.find_commit(oid?)?;
-        if should_process_commit(&commit, config.since_timestamp, config.until_timestamp) {
-            commits.push(commit);
-        }
-    }
-
     let mut stats = ScanStats::default();
     let total = commits.len();
     stats.commits = total;
-    for (index, commit) in commits.into_iter().enumerate() {
+    for (index, oid) in commits.iter().enumerate() {
+        let commit = repo.find_commit(*oid)?;
         let current = index + 1;
         let short_hash = commit.id().to_string()[..8].to_string();
         let subject = commit.summary().unwrap_or("<no subject>");
@@ -51,16 +132,15 @@ pub fn scan_git_history_with_handler<H: FindingHandler>(
             total,
             detail: format!("{short_hash} {subject}"),
         })?;
-        let commit_stats = process_commit(
-            &repo,
-            &commit,
-            scanner,
-            handler,
-            current,
-            total,
-            &short_hash,
-        )?;
+        let commit_stats =
+            process_commit(repo, &commit, scanner, handler, current, total, &short_hash)?;
         stats.files += commit_stats.files;
+        if stats.files > scanner.limits().max_files {
+            return Err(RedflagError::Incomplete(format!(
+                "Git history exceeds the {}-file limit. Narrow the range or increase limits.max_files.",
+                scanner.limits().max_files
+            )));
+        }
         stats.findings += commit_stats.findings;
     }
     handler.progress(ScanProgress::Finished {
@@ -74,21 +154,31 @@ fn push_revisions<'repo>(
     repo: &'repo Repository,
     revwalk: &mut Revwalk<'repo>,
     config: &GitConfig,
-) -> Result<(), RedflagError> {
+) -> Result<Vec<HistoryTip>, RedflagError> {
     let revisions: Vec<&str> = if config.branches.is_empty() {
         vec!["HEAD"]
     } else {
         config.branches.iter().map(String::as_str).collect()
     };
+    let mut tips = Vec::new();
     for revision in revisions {
         let object = repo.revparse_single(revision).map_err(|error| {
             RedflagError::Config(format!(
                 "Git revision '{revision}' cannot be resolved: {error}"
             ))
         })?;
-        revwalk.push(object.id())?;
+        let commit = object.peel_to_commit().map_err(|error| {
+            RedflagError::Config(format!(
+                "Git revision '{revision}' is not a commit: {error}"
+            ))
+        })?;
+        revwalk.push(commit.id())?;
+        tips.push(HistoryTip {
+            revision: revision.into(),
+            commit: commit.id().to_string(),
+        });
     }
-    Ok(())
+    Ok(tips)
 }
 
 fn process_commit<H: FindingHandler>(
@@ -107,6 +197,9 @@ fn process_commit<H: FindingHandler>(
         None
     };
     let mut options = DiffOptions::new();
+    // NUL bytes and Git attributes must not silently turn selected content into
+    // an uninspected binary delta. Unsupported encodings fail below.
+    options.force_text(true);
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
     let metadata = CommitMetadata {
         hash: commit.id().to_string(),
@@ -124,7 +217,11 @@ fn process_commit<H: FindingHandler>(
         let Some(path) = delta.new_file().path() else {
             continue;
         };
-        if !scanner.should_scan_path(path) {
+        let policy = scanner.file_policy(path, false);
+        if delta.new_file().id().is_zero()
+            || policy == ExclusionPolicy::Ignore
+            || !scanner.should_scan_path(path)
+        {
             continue;
         }
         handler.progress(ScanProgress::Item {
@@ -133,33 +230,68 @@ fn process_commit<H: FindingHandler>(
             total,
             detail: format!("{short_hash} {}", path.display()),
         })?;
-        let Some(patch) = Patch::from_diff(&diff, delta_index)? else {
-            continue;
-        };
+        // Check object sizes without materializing large blobs or patches.
+        let odb = repo.odb()?;
+        for oid in [delta.old_file().id(), delta.new_file().id()] {
+            if !oid.is_zero() {
+                let (length, _) = odb.read_header(oid)?;
+                scanner.check_file_limit(path, length as u64)?;
+            }
+        }
+        let patch = Patch::from_diff(&diff, delta_index)?.ok_or_else(|| {
+            RedflagError::Incomplete(format!(
+                "Cannot inspect Git change {} in {short_hash}.",
+                path.display()
+            ))
+        })?;
 
         stats.files += 1;
+        let mut added_lines = Vec::new();
         for hunk_index in 0..patch.num_hunks() {
             let (_, line_count) = patch.hunk(hunk_index)?;
-            let mut state = SuppressionState::default();
             for line_index in 0..line_count {
                 let line = patch.line_in_hunk(hunk_index, line_index)?;
-                if !matches!(line.origin(), '+' | ' ') {
-                    continue;
+                if line.origin() == '+' {
+                    if let Some(number) = line.new_lineno() {
+                        added_lines.push(number as usize);
+                    }
                 }
-                let content = String::from_utf8_lossy(line.content());
-                let content = content.trim_end_matches(['\r', '\n']);
-                stats.findings += scanner.scan_line_with_handler(
-                    ContentLine {
-                        path,
-                        policy_path: path,
-                        number: line.new_lineno().unwrap_or(0) as usize,
-                        content,
-                        commit: Some(&metadata),
-                        emit_findings: line.origin() == '+',
-                    },
-                    &mut state,
-                    handler,
-                )?;
+            }
+        }
+        if added_lines.is_empty() {
+            continue;
+        }
+        let blob = repo.find_blob(delta.new_file().id())?;
+        let content = std::str::from_utf8(blob.content()).map_err(|_| {
+            RedflagError::Incomplete(format!(
+                "Git file {} in {short_hash} is not UTF-8. Convert the file or explicitly exclude unsupported content.",
+                path.display()
+            ))
+        })?;
+        let mut added_lines = added_lines.into_iter().peekable();
+        let mut state = SuppressionState::default();
+        // Read lexical context from the beginning of the actual new blob. A
+        // hunk can begin inside a template/raw string or block comment.
+        for (index, line) in content.lines().enumerate() {
+            let number = index + 1;
+            let emit_findings = added_lines.peek() == Some(&number);
+            if emit_findings {
+                added_lines.next();
+            }
+            stats.findings += scanner.scan_line_with_handler(
+                ContentLine {
+                    path,
+                    policy,
+                    number,
+                    content: line,
+                    commit: Some(&metadata),
+                    emit_findings,
+                },
+                &mut state,
+                handler,
+            )?;
+            if added_lines.peek().is_none() {
+                break;
             }
         }
     }
@@ -304,6 +436,7 @@ mod tests {
         let mut handler = TestHandler::new();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![
                 SecretPattern {
                     name: "test-api-key".to_string(),
@@ -492,6 +625,7 @@ mod tests {
         .unwrap();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![SecretPattern {
                 name: "api-key".to_string(),
                 pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),
@@ -570,6 +704,7 @@ mod tests {
         .unwrap();
 
         let config = Config {
+            limits: Default::default(),
             patterns: vec![SecretPattern {
                 name: "api-key".to_string(),
                 pattern: r#"api_key\s*=\s*"[^"]+""#.to_string(),

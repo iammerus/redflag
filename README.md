@@ -1,8 +1,8 @@
 # Redflag 🚩
 
-Redflag is a small, cross-platform CLI for finding secrets in source files and
-Git history. It combines regular-expression rules for known credential formats
-with heuristic Shannon entropy checks.
+Redflag finds credentials in source files, Git history and files selected for
+publication. Artifact scans also match explicitly declared private build values
+and can verify that upload inputs match the bytes that were scanned.
 
 [![CI](https://github.com/iammerus/redflag/actions/workflows/ci.yml/badge.svg)](https://github.com/iammerus/redflag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iammerus/redflag)](https://github.com/iammerus/redflag/releases/latest)
@@ -16,8 +16,16 @@ Install from source with a current Rust toolchain:
 cargo install --git https://github.com/iammerus/redflag
 ```
 
-Release tags use the `v<version>` form. Package version `0.1.1` therefore uses
-tag `v0.1.1`. Release builds provide Linux, Windows, and macOS x86-64 binaries.
+Artifact and introduced-change scans also require the pinned Betterleaks engine. From a cloned checkout,
+run `python3 scripts/install_engine.py --directory <redflag-binary-directory>/engines`.
+See [engine installation and verification](engines/README.md). The legacy `scan`
+command needs no external engine; `artifacts --engine native` selects that detector
+explicitly for compatibility.
+
+Release tags use the `v<version>` form. This checkout prepares version `0.2.0`;
+the published `v0.1.1` release predates the modernization work. See
+[RELEASES.md](RELEASES.md) for native bundle construction, verification and the
+current platform validation status, including Apple Silicon.
 
 ## Quick start
 
@@ -28,35 +36,80 @@ redflag scan .
 # Scan the current checkout and history reachable from HEAD
 redflag scan . --git-history
 
+# Inspect every introduced commit, including secrets deleted before HEAD
+redflag changes . --base origin/main --head HEAD
+
+# In GitHub Actions, use the exact event's PR, push or merge-queue scope
+redflag changes . --github-event "$GITHUB_EVENT_PATH"
+
 # Create and use a configuration file
 redflag generate-config redflag.toml
-redflag scan . --config redflag.toml
+redflag show-config .
+redflag scan .
+
+# Check all publication files and a private value already present in this build
+redflag artifacts dist --private-env INTERNAL_API_KEY --manifest scan-manifest.json
+redflag verify-artifacts scan-manifest.json
 ```
+
+See [ARTIFACTS.md](ARTIFACTS.md) for strict target selection, private-value matching,
+manifests and checks before publication.
+See [CHANGES.md](CHANGES.md) for committed ranges, trusted base policy, merge
+handling, coverage and current limitations.
 
 ## GitHub Action
 
-Add Redflag to a workflow:
+The prepared `v0.2.0` Action installs verified native binaries and supports source
+changes, publication inputs and manifest verification. It must be published before
+these release-download examples can run; `v0.1.1` retains the older Action.
 
 ```yaml
-name: Secret scan
-
-on: [push, pull_request]
-
+name: Credential check
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
 jobs:
   redflag:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: iammerus/redflag@v0.1.1
+          persist-credentials: false
+      - uses: iammerus/redflag@v0.2.0 # Prefer the published release's full commit SHA
         with:
-          git-history: "true"
+          mode: changes
 ```
 
-The action accepts optional `path` and `config` inputs. It builds the selected
-Redflag revision with stable Rust, redacts secrets by default, and fails when
-findings are present.
+For generated output, run `mode: artifacts` after the trusted build and supply
+explicit `paths` and any `private-env` names. Write a manifest outside those inputs
+and use `mode: verify-artifacts` when a later upload consumes copied output. The
+Action defaults to legacy `scan` for compatibility with existing `path`, `config`
+and `git-history` inputs. See [ACTION.md](ACTION.md) for complete workflows,
+permissions, input contracts and verification requirements.
+
+## Detection coverage
+
+Known GitHub, AWS access ID, Stripe secret/restricted, and npm token formats are
+recognized anywhere on a line, including unnamed values in compiled JavaScript.
+GitHub classic and fine-grained tokens are supported. Provider rules run even
+when entropy checks are disabled; they do not verify whether a credential is live.
+
+Credential assignments support JSON, YAML, shell, TOML, and common source syntax,
+including single quotes, double quotes, backticks, and unquoted values. API-key
+assignments recognize hexadecimal and base64 values without lowering the global
+entropy threshold. Password rules recognize literal fallbacks, including shell
+defaults and JavaScript `||`/`??` expressions.
+
+Built-in validation excludes plain environment references, explicit template
+placeholders, and Stripe publishable keys. Database URL findings require a
+password. Entropy checks skip labeled checksums; provider rules still run on
+those values. Overlapping built-in rules for the same literal produce one finding.
 
 ## Process contract
 
@@ -67,8 +120,8 @@ findings are present.
 | `2` | Arguments, configuration, input, output, or Git caused an operational failure |
 
 stdout contains only the selected report format. Errors, warnings, and progress
-belong on stderr. JSON output is one valid array for clean and finding-producing
-scans.
+belong on stderr. Source `scan` JSON remains an array. `artifacts` and
+`verify-artifacts` use a versioned object with coverage and findings.
 
 Interactive scans show a single-line progress bar on stderr. Redirected output
 and CI stay quiet automatically. Use `--no-progress` to disable progress in a
@@ -88,22 +141,43 @@ redflag scan [PATH]
 | Option | Purpose |
 | --- | --- |
 | `-c, --config <FILE>` | Load a TOML configuration |
-| `-f, --format <text\|json>` | Select text or JSON output |
+| `--no-config` | Use defaults without automatic policy discovery |
+| `-f, --format <text\|json\|json-report>` | Select text, the legacy JSON array, or versioned JSON with coverage |
 | `--show-secrets` | Include raw matched values |
 | `--no-progress` | Disable interactive progress output |
 | `--git-history` | Also scan reachable Git history |
 | `--git-branches <REVISIONS>` | Scan comma-separated branches, tags, or revisions |
-| `--git-max-depth <COUNT>` | Limit reachable commits inspected |
+| `--git-max-depth <COUNT>` | Fail if reachable history exceeds this commit limit |
 | `--git-since <YYYY-MM-DD>` | Ignore older commits |
 | `--git-until <YYYY-MM-DD>` | Ignore newer commits |
 
 When no Git revision is configured, history scanning starts from `HEAD`. Every
 explicit revision must resolve or the scan exits with code `2`.
 
+History scans require a complete checkout. Shallow repositories and histories
+that exceed `--git-max-depth` fail with exit code `2`; they cannot produce a
+clean partial result. Fetch full history and increase the limit when needed.
+
+Use `scan --format json-report` for a version 1 envelope containing the native
+findings, effective policy digest, working-tree statistics and selected history
+scope. The scope records each requested revision and its resolved commit, every
+selected commit ID, date-filter omissions and the traversal limit. Text summaries
+also show the tips, dates and selected/reachable counts. `--format json` retains
+the existing findings-only array. See [REPORTING.md](REPORTING.md).
+
+Dates select commit timestamps inclusively in UTC, from midnight on `--git-since`
+through 23:59:59 on `--git-until`. The commit limit applies to all history reachable
+from the selected tips before date filtering. A complete filtered scan may omit
+older or newer history, and its report identifies that omission. Legacy history
+compares each commit with its first parent and inspects added lines using source
+extensions, exclusions and comment suppressions. For the trusted policy and merge
+semantics of a CI source gate, use [the `changes` command](CHANGES.md).
+
 An explicitly named regular file is scanned regardless of its extension.
 Directory scans use the configured extensions and recognise `.env` and names
 such as `.env.local`. Common extensionless configuration files including
-`.npmrc`, `.netrc`, `Dockerfile`, `Makefile`, and `Jenkinsfile` are also
+`.npmrc`, `.netrc`, `credentials`, SSH private key names such as `id_ed25519`,
+`Dockerfile`, `Makefile`, and `Jenkinsfile` are also
 recognised. Test, example, fixture, and documentation files are not implicitly
 skipped.
 
@@ -118,21 +192,53 @@ Generate a complete starting file:
 redflag generate-config redflag.toml
 ```
 
+Without `--config`, source scans find the nearest `redflag.toml` starting at the
+selected directory (or the parent of a selected file), stopping after checking
+the Git repository root. Outside Git, discovery stops at the filesystem root.
+The nearest file is merged with built-in defaults; parent policies are not layered.
+Artifact scans start discovery at the current workflow directory, so a config
+file inside generated output cannot select the scan's policy.
+
+`--config FILE` selects that file explicitly. `--no-config` disables discovery;
+the two options conflict. Use a trusted explicit policy in CI when a source branch
+can modify its own configuration. The Action's `changes` mode uses trusted base
+policy by default; see [ACTION.md](ACTION.md).
+
+Inspect the resolved policy without scanning:
+
+```sh
+redflag show-config . --format json
+```
+
+The output includes the selected path, merged settings and SHA-256 of the effective
+configuration. Text output is a reusable TOML file with provenance comments.
+Both modes validate regexes and globs before output. Unknown top-level sections
+are errors, so a misspelled section cannot silently leave defaults active.
+
 Configuration is merged with built-in defaults as follows:
 
 - a user pattern replaces a built-in pattern with the same name, otherwise it
   is appended;
 - extensions extend the defaults and are deduplicated without regard to case;
-- exclusions extend the defaults, with exact duplicates removed;
-- a present `[entropy]` or `[git]` section replaces that section after omitted
+- exclusions extend the defaults, keeping the last occurrence of exact duplicates;
+- a present `[entropy]`, `[git]` or `[limits]` section replaces that section after omitted
   fields receive documented defaults;
 - invalid regular expressions, globs, dates, date ranges, entropy values, and
   Git limits are fatal.
 
+Source files are read incrementally. Lines longer than 16 MiB fail operationally
+instead of exhausting memory or being skipped. Set `[limits] max_line_bytes` to
+increase this bound when needed; the limit excludes the line's CR/LF terminator.
+JSON findings use a private temporary spool so report memory does not grow with
+the total number of findings. Temporary-storage failures also fail the scan.
+The defaults also limit files to 64 MiB and each scan phase to 100,000 selected
+files. Set `limits.max_file_bytes` and `limits.max_files` to change these bounds.
+Git blob sizes are checked before patches are constructed.
+
 Example:
 
 ```toml
-extensions = ["tf", "hcl"]
+extensions = ["kt"]
 
 [entropy]
 enabled = false
@@ -144,10 +250,10 @@ max_depth = 1000
 branches = []
 
 [[patterns]]
-name = "stripe-key"
-pattern = '''(?i)sk_(test|live)_[a-z0-9]{24}'''
-description = "Stripe API key"
-severity = "Critical"
+name = "internal-service-token"
+pattern = '''service_token\s*=\s*"(?P<secret>[A-Za-z0-9_-]{32,})"'''
+description = "Internal service token"
+severity = "High"
 
 [[exclusions]]
 pattern = "**/generated/**"
@@ -198,11 +304,15 @@ redflag scan . --git-history --format json > redflag-results.json
 | --- | --- |
 | Languages | `php`, `js`, `ts`, `jsx`, `tsx`, `py`, `rb`, `java`, `go`, `rs`, `cs`, `cpp`, `c`, `h`, `hpp` |
 | Data and configuration | `xml`, `yaml`, `yml`, `json`, `config`, `conf`, `ini`, `env`, `properties`, `toml`, `sql`, `md`, `txt` |
+| Shell and infrastructure | `sh`, `bash`, `zsh`, `tf`, `tfvars`, `hcl` |
+| Credentials and build artifacts | `pem`, `key`, `mjs`, `cjs`, `map` |
 
 ## Limits
 
 - Entropy detection is heuristic. It can miss secrets and report harmless
   strings.
+- Scanning is line based. Encoded, split, or dynamically constructed credentials
+  may be missed. Unknown opaque values still depend on heuristics or custom rules.
 - A clean scan is not a security guarantee.
 - Finding a committed secret does not make it safe again. Revoke or rotate it
   first.
@@ -216,5 +326,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release
 ```
+
+`tests/detection_tests.rs` generates offline fixtures for provider formats,
+assignment syntax, file selection, history, redaction, and benign lookalikes.
+These tests run with the normal CI suite. They measure regression coverage,
+not the probability of finding every secret in a real repository.
 
 Redflag is available under the MIT licence.

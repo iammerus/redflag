@@ -1,57 +1,102 @@
 name: Redflag Secret Scanner
-description: Scan a repository for secrets in files and Git history
+description: Inspect source changes and the exact files selected for publication
 author: iammerus
 
 inputs:
+  mode:
+    description: scan, changes, artifacts or verify-artifacts; scan preserves the legacy behavior
+    default: "scan"
   path:
-    description: File or directory to scan
-    required: false
-    default: .
-  config:
-    description: Path to a Redflag configuration file
-    required: false
+    description: Source checkout, directory or file for scan and changes
+    default: "."
+  paths:
+    description: Publication paths, one per line; required for artifacts, optional replacement roots for verify-artifacts
     default: ""
-  git-history:
-    description: Scan Git history reachable from HEAD
-    required: false
+  config:
+    description: Explicit trusted Redflag configuration file
+    default: ""
+  no-config:
+    description: Use built-in defaults without discovering repository configuration
     default: "false"
+  git-history:
+    description: Include history reachable from HEAD in legacy scan mode
+    default: "false"
+  format:
+    description: Report format; defaults to github for changes/artifacts and text otherwise
+    default: ""
+  engine:
+    description: betterleaks or native for changes/artifacts; defaults to betterleaks
+    default: ""
+  base:
+    description: Explicit trusted base for changes; otherwise use the exact GitHub event scope
+    default: ""
+  head:
+    description: Head revision for an explicit base or new-branch scope
+    default: ""
+  new-branch:
+    description: Inspect all reachable commits when no previous branch tip exists
+    default: "false"
+  merge-result:
+    description: Additional synthetic merge revision for an explicit base/head scope
+    default: ""
+  policy-ref:
+    description: Trusted policy revision for changes, overriding the base policy
+    default: ""
+  max-commits:
+    description: Maximum complete introduced-commit range for changes
+    default: ""
+  exceptions:
+    description: Explicit trusted reviewed-exception file for changes or artifacts
+    default: ""
+  private-env:
+    description: Names of existing private environment variables to protect in artifacts, one per line
+    default: ""
+  allow-short-private-value:
+    description: Declared variable names allowed to contain fewer than eight bytes, one per line
+    default: ""
+  manifest:
+    description: Approval manifest to write in artifacts mode or read in verify-artifacts mode
+    default: ""
+  github-summary:
+    description: Summary output file, overriding GITHUB_STEP_SUMMARY
+    default: ""
+  bundle:
+    description: Optional locally supplied release bundle from a trusted workflow
+    default: ""
+  bundle-sha256:
+    description: Required trusted SHA-256 when bundle is supplied; all bundle integrity checks still apply
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Build Redflag
-      shell: bash
-      run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
-    - name: Scan
+    - name: Install verified Redflag release and inspect selected inputs
       shell: bash
       env:
-        REDFLAG_CONFIG: ${{ inputs.config }}
-        REDFLAG_GIT_HISTORY: ${{ inputs.git-history }}
-        REDFLAG_PATH: ${{ inputs.path }}
-      run: |
-        set -euo pipefail
-
-        binary="$GITHUB_ACTION_PATH/target/release/redflag"
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-          binary="${binary}.exe"
-        fi
-
-        arguments=(scan "$REDFLAG_PATH" --no-progress)
-        if [[ -n "$REDFLAG_CONFIG" ]]; then
-          arguments+=(--config "$REDFLAG_CONFIG")
-        fi
-        case "$REDFLAG_GIT_HISTORY" in
-          true) arguments+=(--git-history) ;;
-          false) ;;
-          *)
-            echo "git-history must be true or false" >&2
-            exit 2
-            ;;
-        esac
-
-        "$binary" "${arguments[@]}"
+        REDFLAG_ACTION_REF: ${{ github.action_ref }}
+        REDFLAG_DOWNLOAD_TOKEN: ${{ github.token }}
+        REDFLAG_INPUT_MODE: ${{ inputs['mode'] }}
+        REDFLAG_INPUT_PATH: ${{ inputs['path'] }}
+        REDFLAG_INPUT_PATHS: ${{ inputs['paths'] }}
+        REDFLAG_INPUT_CONFIG: ${{ inputs['config'] }}
+        REDFLAG_INPUT_NO_CONFIG: ${{ inputs['no-config'] }}
+        REDFLAG_INPUT_GIT_HISTORY: ${{ inputs['git-history'] }}
+        REDFLAG_INPUT_FORMAT: ${{ inputs['format'] }}
+        REDFLAG_INPUT_ENGINE: ${{ inputs['engine'] }}
+        REDFLAG_INPUT_BASE: ${{ inputs['base'] }}
+        REDFLAG_INPUT_HEAD: ${{ inputs['head'] }}
+        REDFLAG_INPUT_NEW_BRANCH: ${{ inputs['new-branch'] }}
+        REDFLAG_INPUT_MERGE_RESULT: ${{ inputs['merge-result'] }}
+        REDFLAG_INPUT_POLICY_REF: ${{ inputs['policy-ref'] }}
+        REDFLAG_INPUT_MAX_COMMITS: ${{ inputs['max-commits'] }}
+        REDFLAG_INPUT_EXCEPTIONS: ${{ inputs['exceptions'] }}
+        REDFLAG_INPUT_PRIVATE_ENV: ${{ inputs['private-env'] }}
+        REDFLAG_INPUT_ALLOW_SHORT_PRIVATE_VALUE: ${{ inputs['allow-short-private-value'] }}
+        REDFLAG_INPUT_MANIFEST: ${{ inputs['manifest'] }}
+        REDFLAG_INPUT_GITHUB_SUMMARY: ${{ inputs['github-summary'] }}
+        REDFLAG_INPUT_BUNDLE: ${{ inputs['bundle'] }}
+        REDFLAG_INPUT_BUNDLE_SHA256: ${{ inputs['bundle-sha256'] }}
+      run: python3 -E -s "$GITHUB_ACTION_PATH/scripts/run_action.py"
 
 branding:
   icon: shield

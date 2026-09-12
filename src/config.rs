@@ -1,10 +1,10 @@
 use crate::error::RedflagError;
 use chrono::NaiveDate;
-use glob::Pattern;
+#[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -14,6 +14,58 @@ pub struct Config {
     pub exclusions: Vec<ExclusionRule>,
     pub entropy: EntropyConfig,
     pub git: GitConfig,
+    pub limits: ScanLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScanLimits {
+    /// Maximum UTF-8 content bytes in one source line, excluding CR/LF.
+    pub max_line_bytes: usize,
+    pub max_file_bytes: u64,
+    pub max_files: usize,
+    /// Maximum total bytes selected for an artifact scan.
+    pub max_total_bytes: u64,
+    pub engine_timeout_seconds: u64,
+    /// Source comparison budgets, including parent detector evidence.
+    pub max_findings: usize,
+    pub max_diff_bytes: usize,
+    pub diff_timeout_seconds: u64,
+    pub max_decode_depth: usize,
+    pub max_decode_candidates: usize,
+    pub max_decoded_bytes: u64,
+    pub max_decode_work_bytes: u64,
+    pub max_decode_map_runs: usize,
+    pub max_archive_depth: usize,
+    pub max_archive_members: usize,
+    pub max_archive_member_bytes: u64,
+    pub max_expanded_bytes: u64,
+    pub max_archive_ratio: u64,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_line_bytes: 16 * 1024 * 1024,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_files: 100_000,
+            max_total_bytes: 1024 * 1024 * 1024,
+            engine_timeout_seconds: 120,
+            max_findings: 100_000,
+            max_diff_bytes: 4 * 1024 * 1024,
+            diff_timeout_seconds: 10,
+            max_decode_depth: 4,
+            max_decode_candidates: 1_000_000,
+            max_decoded_bytes: 1024 * 1024 * 1024,
+            max_decode_work_bytes: 8 * 1024 * 1024 * 1024,
+            max_decode_map_runs: 262_144,
+            max_archive_depth: 4,
+            max_archive_members: 10_000,
+            max_archive_member_bytes: 64 * 1024 * 1024,
+            max_expanded_bytes: 1024 * 1024 * 1024,
+            max_archive_ratio: 1000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -75,6 +127,7 @@ pub struct EntropyConfig {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PartialConfig {
     #[serde(default)]
     patterns: Vec<SecretPattern>,
@@ -84,6 +137,7 @@ struct PartialConfig {
     exclusions: Vec<ExclusionRule>,
     entropy: Option<EntropyConfig>,
     git: Option<GitConfig>,
+    limits: Option<ScanLimits>,
 }
 
 impl Default for EntropyConfig {
@@ -96,115 +150,86 @@ impl Default for EntropyConfig {
     }
 }
 
+// Capture the complete literal, including its quotes, so validation and redaction
+// never operate on a truncated prefix. Custom rules may also capture `secret`.
+const LITERAL: &str = r#"(?P<secret>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\$\{[^{}\r\n]*\}|[^\s"'`,;}\]]+)"#;
+
+fn assignment_pattern(key: &str, operator: &str) -> String {
+    format!(r#"(?i)(?P<key>{key})["'`]?\s*(?:{operator})\s*{LITERAL}"#)
+}
+
+fn fallback_pattern(key: &str, source: &str) -> String {
+    format!(r#"(?i)(?P<key>{key})["'`]?\s*(?::|=)\s*(?:{source})\s*(?:\|\||\?\?)\s*{LITERAL}"#)
+}
+
 static DEFAULT_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
+    let rule = |name: &str, pattern: String, description: &str, severity| SecretPattern {
+        name: name.to_string(),
+        pattern,
+        description: description.to_string(),
+        severity,
+    };
+    let environment = r"process\.env\.[A-Za-z0-9_]+";
+    let expression = r"[^,;\r\n]+?";
     vec![
-        SecretPattern {
-            name: "AWS Access Key".to_string(),
-            pattern: r"(?i)(AWS|AMAZON)_?(ACCESS|SECRET)?_?(KEY)?_?ID\s*=?\s*[A-Z0-9]{20}".to_string(),
-            description: "AWS Access Key ID detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret Key".to_string(),
-            pattern: r"(?i)(AWS|AMAZON)_?SECRET_?(ACCESS_?)?KEY\s*=?\s*[A-Za-z0-9/+=]{40}".to_string(),
-            description: "AWS Secret Access Key detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Key in Object".to_string(),
-            pattern: r#"key\s*:\s*['""]AKIA[A-Z0-9]{16}['""]"#.to_string(),
-            description: "AWS Access Key ID in object property detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret in Object".to_string(),
-            pattern: r#"secret\s*:\s*['""][A-Za-z0-9/+=]{40}['""]"#.to_string(),
-            description: "AWS Secret Access Key in object property detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Direct Key Assignment".to_string(),
-            pattern: r#"key\s*:\s*process\.env\.AWS_ACCESS_KEY_ID\s*\|\|\s*['"]AKIA[A-Z0-9]{16}['"]"#.to_string(),
-            description: "AWS Access Key ID with direct assignment detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Direct Secret Assignment".to_string(),
-            pattern: r#"secret\s*:\s*process\.env\.AWS_SECRET_ACCESS_KEY\s*\|\|\s*['"][A-Za-z0-9/+=]{40}['"]"#.to_string(),
-            description: "AWS Secret Access Key with direct assignment detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Access Key with Fallback".to_string(),
-            pattern: r#"(?i)key\s*:\s*.*\|\|\s*['"]AKIA[A-Z0-9]{16}['"]"#.to_string(),
-            description: "AWS Access Key ID with environment fallback detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "AWS Secret with Fallback".to_string(),
-            pattern: r#"(?i)secret\s*:\s*.*\|\|\s*['"][A-Za-z0-9/+=]{40}['"]"#.to_string(),
-            description: "AWS Secret Access Key with environment fallback detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Password with Fallback".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*:\s*.*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password with environment fallback".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Generic Fallback Secret".to_string(),
-            pattern: r#"(?i)(secret|token|credential|api[_\-\s]*key)\s*:\s*process\.env\.[A-Za-z0-9_]+\s*\|\|\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded secret with environment fallback".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "GitHub Token".to_string(),
-            pattern: r"(?i)github[_\-\s]*(pat|token|key)\s*=?\s*gh[pousr]_[a-zA-Z0-9]{36}".to_string(),
-            description: "GitHub Personal Access Token detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Generic API Key".to_string(),
-            pattern: r#"(?i)api[_\-\s]*key\s*=?\s*['""][a-zA-Z0-9]{32,}['""]"#.to_string(),
-            description: "Generic API key detected".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Private Key".to_string(),
-            pattern: r"-----BEGIN\s+(RSA|DSA|EC|OPENSSH)?\s*PRIVATE\s+KEY(\s+ENCRYPTED)?-----".to_string(),
-            description: "Private key file detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "Password Assignment".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*=\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Password in Object".to_string(),
-            pattern: r#"(?i)(password|passwd|pwd)\s*:\s*['""][^'""]{8,}['""]"#.to_string(),
-            description: "Possible hardcoded password in object property".to_string(),
-            severity: Severity::High,
-        },
-        SecretPattern {
-            name: "Database Connection String".to_string(),
-            pattern: r#"(?i)(mongodb|postgresql|mysql)://[^\s<>'"""]+"#.to_string(),
-            description: "Database connection string detected".to_string(),
-            severity: Severity::Critical,
-        },
-        SecretPattern {
-            name: "JWT Token".to_string(),
-            pattern: r"eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*".to_string(),
-            description: "JWT token detected".to_string(),
-            severity: Severity::High,
-        },
+        rule("AWS Access Key",
+            r"(?P<secret>(?:AKIA|ASIA)[A-Z0-9]{16})".to_string(),
+            "AWS Access Key ID detected", Severity::Critical),
+        rule("AWS Secret Key",
+            assignment_pattern(r"(?:AWS|AMAZON)_?SECRET_?(?:ACCESS_?)?KEY", ":=|=>|=|:"),
+            "AWS Secret Access Key detected", Severity::Critical),
+        rule("AWS Key in Object", assignment_pattern("key", ":"),
+            "AWS Access Key ID in object property detected", Severity::Critical),
+        rule("AWS Secret in Object", assignment_pattern("secret", ":"),
+            "Possible AWS Secret Access Key in object property", Severity::High),
+        rule("AWS Direct Key Assignment", fallback_pattern("key", environment),
+            "AWS Access Key ID with direct assignment detected", Severity::Critical),
+        rule("AWS Direct Secret Assignment", fallback_pattern("secret", environment),
+            "Possible AWS Secret Access Key with direct assignment", Severity::High),
+        rule("AWS Access Key with Fallback", fallback_pattern("key", expression),
+            "AWS Access Key ID with environment fallback detected", Severity::Critical),
+        rule("AWS Secret with Fallback", fallback_pattern("secret", expression),
+            "Possible AWS Secret Access Key with environment fallback", Severity::High),
+        rule("Password with Fallback", fallback_pattern("password|passwd|pwd", expression),
+            "Possible hardcoded password with environment fallback", Severity::High),
+        rule("Generic Fallback Secret", fallback_pattern(r"secret|token|credential|api[_\-\s]*key", environment),
+            "Possible hardcoded secret with environment fallback", Severity::High),
+        rule("GitHub Token",
+            r"(?P<secret>gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59})".to_string(),
+            "GitHub token detected", Severity::Critical),
+        rule("Stripe Secret Key",
+            r"(?P<secret>(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,})".to_string(),
+            "Stripe secret or restricted API key detected", Severity::Critical),
+        rule("npm Access Token", r"(?P<secret>npm_[A-Za-z0-9]{36})".to_string(),
+            "npm access token detected", Severity::Critical),
+        rule("Generic API Key", assignment_pattern(r"api[_\-\s]*key", ":=|=>|=|:"),
+            "Generic API key detected", Severity::High),
+        rule("Private Key",
+            r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----".to_string(),
+            "Private key file detected", Severity::Critical),
+        rule("Password Assignment", assignment_pattern("password|passwd|pwd", ":=|=>|="),
+            "Possible hardcoded password", Severity::High),
+        rule("Password in Object", assignment_pattern("password|passwd|pwd", ":"),
+            "Possible hardcoded password in object property", Severity::High),
+        rule("Netrc Password", format!(r"(?i)\bpassword\s+{LITERAL}"),
+            "Password in netrc credentials file", Severity::High),
+        rule("Database Connection String",
+            r#"(?i)(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql)://[^\s<>/:'"`]+:[^\s<>@'"`]+@[^\s<>'"`]+"#.to_string(),
+            "Database connection string with password detected", Severity::Critical),
+        rule("JWT Token",
+            r"(?P<secret>eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)".to_string(),
+            "JWT token detected", Severity::High),
     ]
 });
 
 fn default_patterns() -> Vec<SecretPattern> {
     DEFAULT_PATTERNS.clone()
+}
+
+pub(crate) fn is_default_pattern(pattern: &SecretPattern) -> bool {
+    DEFAULT_PATTERNS
+        .iter()
+        .any(|default| default.name == pattern.name && default.pattern == pattern.pattern)
 }
 
 fn default_extensions() -> Vec<String> {
@@ -237,6 +262,17 @@ fn default_extensions() -> Vec<String> {
         "sql".to_string(),
         "md".to_string(),
         "txt".to_string(),
+        "sh".to_string(),
+        "bash".to_string(),
+        "zsh".to_string(),
+        "tf".to_string(),
+        "tfvars".to_string(),
+        "hcl".to_string(),
+        "pem".to_string(),
+        "key".to_string(),
+        "map".to_string(),
+        "mjs".to_string(),
+        "cjs".to_string(),
     ]
 }
 
@@ -257,10 +293,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
         },
         ExclusionRule {
             pattern: "**/target/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/dist/**".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
         // Additional package manager folders
@@ -300,23 +332,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
             pattern: "**/.bundle/**".to_string(), // Ruby bundle
             policy: ExclusionPolicy::Ignore,
         },
-        // Build directories
-        ExclusionRule {
-            pattern: "**/build/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/out/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/.next/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/.nuxt/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
         // Other common directories to ignore
         ExclusionRule {
             pattern: "**/coverage/**".to_string(),
@@ -332,10 +347,6 @@ fn default_exclusions() -> Vec<ExclusionRule> {
         },
         ExclusionRule {
             pattern: "**/.cache/**".to_string(),
-            policy: ExclusionPolicy::Ignore,
-        },
-        ExclusionRule {
-            pattern: "**/*.min.js".to_string(),
             policy: ExclusionPolicy::Ignore,
         },
     ]
@@ -369,62 +380,148 @@ impl Default for GitConfig {
 }
 
 impl Config {
-    pub fn load(path: Option<PathBuf>) -> Result<Self, RedflagError> {
-        let mut config = Config::default();
-
-        if let Some(config_path) = path {
-            let user: PartialConfig = toml::from_str(&fs::read_to_string(config_path)?)?;
-
-            for pattern in user.patterns {
-                if let Some(existing) = config
-                    .patterns
-                    .iter()
-                    .position(|current| current.name == pattern.name)
-                {
-                    config.patterns[existing] = pattern;
-                } else {
-                    config.patterns.push(pattern);
+    /// Find the nearest policy up to the repository boundary. Callers choose the
+    /// search origin: source target for source scans, cwd for publication scans.
+    pub fn resolve_path(
+        explicit: Option<PathBuf>,
+        start: &Path,
+        no_config: bool,
+    ) -> Result<Option<PathBuf>, RedflagError> {
+        if let Some(path) = explicit {
+            return fs::canonicalize(&path)
+                .map(Some)
+                .map_err(|source| RedflagError::PathIo { path, source });
+        }
+        if no_config {
+            return Ok(None);
+        }
+        let mut directory = fs::canonicalize(start).map_err(|source| RedflagError::PathIo {
+            path: start.to_path_buf(),
+            source,
+        })?;
+        if directory.is_file() {
+            directory.pop();
+        }
+        loop {
+            let candidate = directory.join("redflag.toml");
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => return Ok(Some(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(RedflagError::PathIo {
+                        path: candidate,
+                        source,
+                    })
                 }
             }
-            for extension in user.extensions {
-                if !config
-                    .extensions
-                    .iter()
-                    .any(|current| current.eq_ignore_ascii_case(&extension))
-                {
-                    config.extensions.push(extension);
+            match fs::symlink_metadata(directory.join(".git")) {
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(RedflagError::PathIo {
+                        path: directory.join(".git"),
+                        source,
+                    })
                 }
             }
-            for exclusion in user.exclusions {
-                if !config.exclusions.contains(&exclusion) {
-                    config.exclusions.push(exclusion);
-                }
-            }
-            if let Some(entropy) = user.entropy {
-                config.entropy = entropy;
-            }
-            if let Some(git) = user.git {
-                config.git = git;
+            if !directory.pop() {
+                return Ok(None);
             }
         }
+    }
 
+    pub fn load(path: Option<PathBuf>) -> Result<Self, RedflagError> {
+        match path {
+            Some(path) => Self::from_toml(&fs::read_to_string(path)?),
+            None => Self::from_toml(""),
+        }
+    }
+
+    pub(crate) fn from_toml(content: &str) -> Result<Self, RedflagError> {
+        let mut config = Config::default();
+        let user: PartialConfig = toml::from_str(content)?;
+
+        for pattern in user.patterns {
+            if let Some(existing) = config
+                .patterns
+                .iter()
+                .position(|current| current.name == pattern.name)
+            {
+                config.patterns[existing] = pattern;
+            } else {
+                config.patterns.push(pattern);
+            }
+        }
+        for extension in user.extensions {
+            if !config
+                .extensions
+                .iter()
+                .any(|current| current.eq_ignore_ascii_case(&extension))
+            {
+                config.extensions.push(extension);
+            }
+        }
+        for exclusion in user.exclusions {
+            // Keep the last occurrence at its original precedence. Removing
+            // a later duplicate can leave an intervening Ignore rule active.
+            config.exclusions.retain(|existing| existing != &exclusion);
+            config.exclusions.push(exclusion);
+        }
+        if let Some(entropy) = user.entropy {
+            config.entropy = entropy;
+        }
+        if let Some(git) = user.git {
+            config.git = git;
+        }
+        if let Some(limits) = user.limits {
+            config.limits = limits;
+        }
         config.validate()?;
         Ok(config)
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), RedflagError> {
-        for pattern in &self.patterns {
-            Regex::new(&pattern.pattern).map_err(|error| {
-                RedflagError::Config(format!("Invalid regex for '{}': {error}", pattern.name))
-            })?;
+        if !(1..=16).contains(&self.limits.max_archive_depth)
+            || self.limits.max_archive_members == 0
+            || self.limits.max_archive_member_bytes == 0
+            || self.limits.max_expanded_bytes == 0
+            || self.limits.max_archive_ratio == 0
+        {
+            return Err(RedflagError::Config("Archive limits must be positive; limits.max_archive_depth must be between 1 and 16".into()));
         }
-        for exclusion in &self.exclusions {
-            Pattern::new(&exclusion.pattern).map_err(|error| {
-                RedflagError::Config(format!(
-                    "Invalid exclusion glob '{}': {error}",
-                    exclusion.pattern
-                ))
-            })?;
+        if !(1..=16).contains(&self.limits.max_decode_depth)
+            || self.limits.max_decode_candidates == 0
+            || self.limits.max_decoded_bytes == 0
+            || self.limits.max_decode_work_bytes == 0
+            || self.limits.max_decode_map_runs == 0
+        {
+            return Err(RedflagError::Config("Decoding limits must be positive; limits.max_decode_depth must be between 1 and 16".into()));
+        }
+        if self.limits.max_findings == 0
+            || self.limits.max_diff_bytes == 0
+            || self.limits.diff_timeout_seconds == 0
+        {
+            return Err(RedflagError::Config("limits.max_findings, limits.max_diff_bytes and limits.diff_timeout_seconds must be positive".into()));
+        }
+        if self.limits.engine_timeout_seconds == 0 {
+            return Err(RedflagError::Config(
+                "limits.engine_timeout_seconds must be positive".into(),
+            ));
+        }
+        // Regexes and globs are validated by compiling them once in Scanner.
+        if self.limits.max_line_bytes == 0 || self.limits.max_line_bytes.checked_add(3).is_none() {
+            return Err(RedflagError::Config(
+                "limits.max_line_bytes must be positive and leave room for a line terminator"
+                    .to_string(),
+            ));
+        }
+        if self.limits.max_file_bytes == 0
+            || self.limits.max_files == 0
+            || self.limits.max_total_bytes == 0
+        {
+            return Err(RedflagError::Config(
+                "limits.max_file_bytes, limits.max_files and limits.max_total_bytes must be positive".to_string(),
+            ));
         }
         if !(0.0..=8.0).contains(&self.entropy.threshold) {
             return Err(RedflagError::Config(
@@ -497,6 +594,7 @@ impl Default for Config {
             exclusions: default_exclusions(),
             entropy: EntropyConfig::default(),
             git: GitConfig::default(),
+            limits: ScanLimits::default(),
         }
     }
 }
@@ -510,7 +608,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("redflag.toml");
         fs::write(&path, contents).unwrap();
-        Config::load(Some(path))
+        let config = Config::load(Some(path))?;
+        crate::scanner::Scanner::with_config(config.clone())?;
+        Ok(config)
     }
 
     #[test]

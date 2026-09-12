@@ -1,22 +1,25 @@
 use crate::{
-    config::{Config, EntropyConfig, ExclusionPolicy, Severity},
+    config::{
+        is_default_pattern, Config, EntropyConfig, ExclusionPolicy, ScanLimits, SecretPattern,
+        Severity,
+    },
     error::RedflagError,
 };
 use glob::Pattern;
 use regex::Regex;
 use std::{
+    collections::HashMap,
     fs,
+    io::{BufRead, BufReader, Read},
     ops::Range,
     path::{Path, PathBuf},
     sync::LazyLock,
 };
 use walkdir::WalkDir;
 
-const IGNORE_COMMENT_PATTERN: &str = r"(?i)//\s*redflag-ignore(?:-next)?(?:\s+.*)?$";
-static IGNORE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(IGNORE_COMMENT_PATTERN).unwrap());
+pub(crate) use crate::suppression::SuppressionState;
 
-#[derive(Debug, serde::Serialize, Clone)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Finding {
     pub file: PathBuf,
     pub line: usize,
@@ -30,6 +33,27 @@ pub struct Finding {
     pub commit_author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_date: Option<String>,
+    /// Required match spans, in 1-based lines and inclusive byte columns.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<FindingSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<FindingSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub representation: Vec<crate::decoding::Step>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive: Vec<crate::archives::Member>,
+    /// Private per-scan grouping material; never part of a public finding.
+    #[serde(skip)]
+    pub(crate) grouping_key: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct FindingSpan {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub start_column: usize,
+    pub end_column: usize,
 }
 
 #[derive(Clone)]
@@ -39,7 +63,7 @@ pub(crate) struct CommitMetadata {
     pub date: String,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 pub(crate) struct ScanStats {
     pub files: usize,
     pub findings: usize,
@@ -64,11 +88,70 @@ pub(crate) enum ScanProgress {
 }
 
 pub struct Scanner {
-    patterns: Vec<(Regex, String, String, Severity)>,
+    patterns: Vec<CompiledPattern>,
     entropy_config: EntropyConfig,
     extensions: Vec<String>,
     exclusions: Vec<ExclusionRule>,
     show_secrets: bool,
+    limits: ScanLimits,
+}
+
+struct CompiledPattern {
+    regex: Regex,
+    rule: SecretPattern,
+    builtin: bool,
+}
+
+impl CompiledPattern {
+    fn new(rule: SecretPattern) -> Result<Self, RedflagError> {
+        Ok(Self {
+            regex: Regex::new(&rule.pattern).map_err(|error| {
+                RedflagError::Config(format!("Invalid regex for '{}': {error}", rule.name))
+            })?,
+            builtin: is_default_pattern(&rule),
+            rule,
+        })
+    }
+
+    fn ranges(&self, line: &str, path: &Path) -> Vec<Range<usize>> {
+        self.regex
+            .captures_iter(line)
+            .filter_map(|captures| {
+                let full_match = captures.get(0)?;
+                let found = captures.name("secret").unwrap_or(full_match);
+                let mut range = found.range();
+                if self.builtin {
+                    if captures.name("key").is_some_and(|key| {
+                        !credential_key_boundary(line, key.start(), key.as_str())
+                    }) {
+                        return None;
+                    }
+                    // The colon in ${PASSWORD:-value} is a shell operator,
+                    // not an object assignment to PASSWORD.
+                    if found.start() > full_match.start()
+                        && inside_shell_parameter(&line[..full_match.start()])
+                    {
+                        return None;
+                    }
+                    let mut quoted = is_quoted(found.as_str());
+                    if quoted {
+                        range = range.start + 1..range.end - 1;
+                    }
+                    if let Some(default) = shell_default_range(line, &range) {
+                        range = default;
+                        quoted = is_quoted(&line[range.clone()]);
+                        if quoted {
+                            range = range.start + 1..range.end - 1;
+                        }
+                    }
+                    if !valid_builtin(&self.rule.name, line, &range, quoted, path) {
+                        return None;
+                    }
+                }
+                Some(range)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,20 +170,19 @@ pub(crate) struct Detection<'a> {
 
 pub(crate) struct ContentLine<'a> {
     pub path: &'a Path,
-    pub policy_path: &'a Path,
+    pub policy: ExclusionPolicy,
     pub number: usize,
     pub content: &'a str,
     pub commit: Option<&'a CommitMetadata>,
     pub emit_findings: bool,
 }
 
-#[derive(Default)]
-pub(crate) struct SuppressionState {
-    ignore_next_line: bool,
-}
-
 pub trait FindingHandler {
     fn handle(&mut self, finding: Finding) -> Result<(), RedflagError>;
+
+    fn warning(&mut self, _finding: Finding) -> Result<(), RedflagError> {
+        Ok(())
+    }
 
     fn progress(&mut self, _progress: ScanProgress) -> Result<(), RedflagError> {
         Ok(())
@@ -108,26 +190,24 @@ pub trait FindingHandler {
 }
 
 impl Scanner {
-    pub fn with_config(config: Config) -> Result<Self, RedflagError> {
+    pub fn with_config(mut config: Config) -> Result<Self, RedflagError> {
+        config.validate()?;
         let patterns = config
             .patterns
             .into_iter()
-            .map(|pattern| {
-                Ok((
-                    Regex::new(&pattern.pattern)?,
-                    pattern.name,
-                    pattern.description,
-                    pattern.severity,
-                ))
-            })
+            .map(CompiledPattern::new)
             .collect::<Result<Vec<_>, RedflagError>>()?;
         let exclusions = config
             .exclusions
             .into_iter()
             .map(|rule| {
                 Ok(ExclusionRule {
-                    pattern: Pattern::new(&rule.pattern)
-                        .map_err(|error| RedflagError::Config(error.to_string()))?,
+                    pattern: Pattern::new(&rule.pattern).map_err(|error| {
+                        RedflagError::Config(format!(
+                            "Invalid exclusion glob '{}': {error}",
+                            rule.pattern
+                        ))
+                    })?,
                     literal_prefix: rule
                         .pattern
                         .split(['*', '?', '[', '{'])
@@ -147,12 +227,36 @@ impl Scanner {
             extensions: config.extensions,
             exclusions,
             show_secrets: false,
+            limits: config.limits,
         })
     }
 
     pub fn show_secrets(mut self, show_secrets: bool) -> Self {
         self.show_secrets = show_secrets;
         self
+    }
+
+    pub fn for_external_engine(mut self) -> Self {
+        // Preserve explicit TOML rules and the format-specific netrc check,
+        // which the pinned general engine does not currently cover.
+        self.patterns
+            .retain(|pattern| !pattern.builtin || pattern.rule.name == "Netrc Password");
+        self.entropy_config.enabled = false;
+        self
+    }
+
+    pub(crate) fn limits(&self) -> &ScanLimits {
+        &self.limits
+    }
+
+    pub(crate) fn check_file_limit(&self, path: &Path, length: u64) -> Result<(), RedflagError> {
+        if length > self.limits.max_file_bytes {
+            return Err(RedflagError::Incomplete(format!(
+                "{} exceeds the {}-byte file limit. Increase limits.max_file_bytes to inspect this content.",
+                path.display(), self.limits.max_file_bytes
+            )));
+        }
+        Ok(())
     }
 
     pub fn scan_with_handler<H: FindingHandler>(
@@ -212,6 +316,12 @@ impl Scanner {
                 && self.should_scan_path(entry.path())
             {
                 files_to_scan.push((entry.into_path(), relative));
+                if files_to_scan.len() > self.limits.max_files {
+                    return Err(RedflagError::Incomplete(format!(
+                        "The scan exceeds the {}-file limit. Narrow the target or increase limits.max_files.",
+                        self.limits.max_files
+                    )));
+                }
             }
         }
         files_to_scan.sort_by(|left, right| left.0.cmp(&right.0));
@@ -288,36 +398,53 @@ impl Scanner {
         policy_path: &Path,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let content = fs::read_to_string(path).map_err(|source| RedflagError::PathIo {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        self.scan_content(path, policy_path, &content, None, handler)
-    }
-
-    fn scan_content<H: FindingHandler>(
-        &self,
-        path: &Path,
-        policy_path: &Path,
-        content: &str,
-        commit: Option<&CommitMetadata>,
-        handler: &mut H,
-    ) -> Result<usize, RedflagError> {
         let policy = self.file_policy(policy_path, false);
         if policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
-
+        let file = fs::File::open(path).map_err(|source| RedflagError::PathIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut buffer = Vec::new();
         let mut state = SuppressionState::default();
         let mut findings_count = 0;
-        for (line_num, line) in content.lines().enumerate() {
+        let mut number = 0;
+        let mut bytes_read = 0u64;
+        loop {
+            buffer.clear();
+            let remaining_file_bytes = self
+                .limits
+                .max_file_bytes
+                .saturating_sub(bytes_read)
+                .saturating_add(1);
+            let read = (&mut reader)
+                .take(((self.limits.max_line_bytes + 3) as u64).min(remaining_file_bytes))
+                .read_until(b'\n', &mut buffer)
+                .map_err(|source| RedflagError::PathIo {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if read == 0 {
+                break;
+            }
+            bytes_read += read as u64;
+            self.check_file_limit(path, bytes_read)?;
+            number += 1;
+            let bytes = buffer.strip_suffix(b"\n").unwrap_or(&buffer);
+            let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+            self.check_line_limit(path, number, bytes.len())?;
+            let line = std::str::from_utf8(bytes).map_err(|_| RedflagError::Incomplete(format!(
+                "{}:{number} is not UTF-8. Convert the file or explicitly exclude unsupported content.", path.display()
+            )))?;
             findings_count += self.scan_line_with_handler(
                 ContentLine {
                     path,
-                    policy_path,
-                    number: line_num + 1,
+                    policy,
+                    number,
                     content: line,
-                    commit,
+                    commit: None,
                     emit_findings: true,
                 },
                 &mut state,
@@ -327,22 +454,41 @@ impl Scanner {
         Ok(findings_count)
     }
 
+    pub(crate) fn check_line_limit(
+        &self,
+        path: &Path,
+        number: usize,
+        length: usize,
+    ) -> Result<(), RedflagError> {
+        if length > self.limits.max_line_bytes {
+            return Err(RedflagError::Incomplete(format!(
+                "{}:{number} exceeds the {}-byte line limit. Increase limits.max_line_bytes to inspect this content.",
+                path.display(), self.limits.max_line_bytes
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn scan_line_with_handler<H: FindingHandler>(
         &self,
         input: ContentLine<'_>,
         state: &mut SuppressionState,
         handler: &mut H,
     ) -> Result<usize, RedflagError> {
-        let policy = self.file_policy(input.policy_path, false);
-        let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
-        if !input.emit_findings || policy == ExclusionPolicy::Ignore {
+        if input.policy == ExclusionPolicy::Ignore {
             return Ok(0);
         }
+        self.check_line_limit(input.path, input.number, input.content.len())?;
+        if !input.emit_findings {
+            state.consume(input.path, input.content);
+            return Ok(0);
+        }
+        let findings = self.scan_line(input.path, input.number, input.content, state, input.commit);
 
         let mut count = 0;
         for finding in findings {
-            if policy == ExclusionPolicy::ScanButWarn {
-                eprintln!("WARNING: Potential secret found but allowed: {finding:?}");
+            if input.policy == ExclusionPolicy::ScanButWarn {
+                handler.warning(finding)?;
             } else {
                 handler.handle(finding)?;
                 count += 1;
@@ -359,31 +505,92 @@ impl Scanner {
         state: &mut SuppressionState,
         commit: Option<&CommitMetadata>,
     ) -> Vec<Finding> {
-        if IGNORE_REGEX.is_match(line) {
-            if line.to_ascii_lowercase().contains("ignore-next") {
-                state.ignore_next_line = true;
-            }
-            return Vec::new();
-        }
-        if state.ignore_next_line {
-            state.ignore_next_line = false;
+        if state.consume(path, line) {
             return Vec::new();
         }
 
-        let mut detections = Vec::new();
-        for (pattern, name, description, severity) in &self.patterns {
-            for secret_match in pattern.find_iter(line) {
+        self.detect_line(path, line_number, line, commit, false)
+    }
+
+    /// Inspect published content without source exclusions or comment directives.
+    /// Byte matching of declared values is handled before this text projection.
+    pub(crate) fn scan_artifact_line<H: FindingHandler>(
+        &self,
+        path: &Path,
+        line_number: usize,
+        bytes: &[u8],
+        handler: &mut H,
+    ) -> Result<usize, RedflagError> {
+        self.check_line_limit(path, line_number, bytes.len())?;
+        let line = String::from_utf8_lossy(bytes);
+        let mut findings = self.detect_line(path, line_number, &line, None, true);
+        if matches!(line, std::borrow::Cow::Owned(_)) && !findings.is_empty() {
+            restore_byte_columns(bytes, &mut findings);
+        }
+        let count = findings.len();
+        for mut finding in findings {
+            let span = &finding.evidence[0];
+            finding.primary = Some(span.clone());
+            finding.grouping_key = Some(crate::artifacts::digest(
+                &bytes[span.start_column - 1..span.end_column],
+            ));
+            // Nearby opaque private values must never appear as context.
+            finding.snippet = "[REDACTED]".into();
+            handler.handle(finding)?;
+        }
+        Ok(count)
+    }
+
+    fn detect_line(
+        &self,
+        path: &Path,
+        line_number: usize,
+        line: &str,
+        commit: Option<&CommitMetadata>,
+        include_evidence: bool,
+    ) -> Vec<Finding> {
+        let mut detections: Vec<Detection<'_>> = Vec::new();
+        let mut builtin_indices: HashMap<(usize, usize), usize> = HashMap::new();
+        for pattern in &self.patterns {
+            for range in pattern.ranges(line, path) {
+                // Keep independent values on a line, but report a literal only
+                // once when several built-in rules recognize the same value.
+                if pattern.builtin {
+                    if let Some(index) = builtin_indices.get(&(range.start, range.end)) {
+                        let previous = &mut detections[*index];
+                        if severity_rank(pattern.rule.severity) < severity_rank(previous.severity) {
+                            previous.name = &pattern.rule.name;
+                            previous.description = &pattern.rule.description;
+                            previous.severity = pattern.rule.severity;
+                        }
+                        continue;
+                    }
+                    builtin_indices.insert((range.start, range.end), detections.len());
+                }
                 detections.push(Detection {
-                    range: secret_match.range(),
-                    name,
-                    description,
-                    severity: *severity,
+                    range,
+                    name: &pattern.rule.name,
+                    description: &pattern.rule.description,
+                    severity: pattern.rule.severity,
                 });
             }
         }
 
         if self.entropy_config.enabled && !is_lockfile(path) {
+            let known_ranges = merged_ranges(detections.iter().map(|item| item.range.clone()));
             for candidate in extract_entropy_candidates(line, self.entropy_config.min_length) {
+                let preceding =
+                    known_ranges.partition_point(|range| range.start <= candidate.start);
+                let covered = preceding
+                    .checked_sub(1)
+                    .is_some_and(|index| known_ranges[index].end >= candidate.end);
+                if covered
+                    || is_checksum_context(&line[..candidate.start])
+                    || is_reference(&line[candidate.clone()])
+                    || is_publishable_key(&line[candidate.clone()])
+                {
+                    continue;
+                }
                 if calculate_shannon_entropy(&line[candidate.clone()])
                     >= self.entropy_config.threshold
                 {
@@ -401,7 +608,20 @@ impl Scanner {
         detections
             .into_iter()
             .map(|detection| {
-                self.create_finding(path, line_number, line, detection, &redactions, commit)
+                let evidence = if include_evidence {
+                    vec![FindingSpan {
+                        start_line: line_number,
+                        end_line: line_number,
+                        start_column: detection.range.start + 1,
+                        end_column: detection.range.end,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let mut finding =
+                    self.create_finding(path, line_number, line, detection, &redactions, commit);
+                finding.evidence = evidence;
+                finding
             })
             .collect()
     }
@@ -420,12 +640,60 @@ impl Scanner {
             line,
             pattern_name: detection.name.to_string(),
             description: detection.description.to_string(),
+            evidence: Vec::new(),
+            primary: None,
+            representation: Vec::new(),
+            archive: Vec::new(),
+            grouping_key: None,
             snippet: finding_snippet(text, detection.range, redactions, self.show_secrets),
             severity: detection.severity,
             commit_hash: commit.map(|metadata| metadata.hash.clone()),
             commit_author: commit.map(|metadata| metadata.author.clone()),
             commit_date: commit.map(|metadata| metadata.date.clone()),
         }
+    }
+}
+
+fn restore_byte_columns(bytes: &[u8], findings: &mut [Finding]) {
+    // Record only queried locations, not every invalid byte of a binary line.
+    let mut points = Vec::new();
+    for (finding, item) in findings.iter().enumerate() {
+        for (span, evidence) in item.evidence.iter().enumerate() {
+            points.push((evidence.start_column - 1, finding, span, false));
+            points.push((evidence.end_column, finding, span, true));
+        }
+    }
+    points.sort_unstable();
+    let mut points = points.into_iter().peekable();
+    let mut assign = |point: (usize, usize, usize, bool), offset: usize| {
+        let span = &mut findings[point.1].evidence[point.2];
+        if point.3 {
+            span.end_column = offset;
+        } else {
+            span.start_column = offset + 1;
+        }
+    };
+    let (mut raw, mut projected) = (0, 0);
+    while let Err(error) = std::str::from_utf8(&bytes[raw..]) {
+        raw += error.valid_up_to();
+        projected += error.valid_up_to();
+        while points.peek().is_some_and(|p| p.0 <= projected) {
+            let point = points.next().expect("peeked above");
+            assign(point, raw - (projected - point.0));
+        }
+        let length = error.error_len().unwrap_or(bytes.len() - raw);
+        while points.peek().is_some_and(|p| p.0 < projected + 3) {
+            let point = points.next().expect("peeked above");
+            assign(point, if point.3 { raw + length } else { raw });
+        }
+        raw += length;
+        projected += 3;
+        if points.peek().is_none() {
+            return;
+        }
+    }
+    for point in points {
+        assign(point, raw + point.0 - projected);
     }
 }
 
@@ -450,10 +718,11 @@ pub(crate) fn finding_snippet(
     } else {
         let mut snippet = String::new();
         let mut cursor = start;
-        for range in redactions {
-            if range.end <= start || range.start >= end {
-                continue;
-            }
+        let first = redactions.partition_point(|range| range.end <= start);
+        for range in redactions[first..]
+            .iter()
+            .take_while(|range| range.start < end)
+        {
             if range.start > cursor {
                 snippet.push_str(&text[cursor..range.start.min(end)]);
             }
@@ -524,22 +793,253 @@ fn is_known_extensionless_file(path: &Path) -> bool {
                 | "Containerfile"
                 | "Makefile"
                 | "Jenkinsfile"
+                | "credentials"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ecdsa"
+                | "id_ed25519"
         )
     )
 }
 
+fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Critical => 0,
+        Severity::High => 1,
+        Severity::Medium => 2,
+        Severity::Low => 3,
+    }
+}
+
+fn is_quoted(value: &str) -> bool {
+    value.len() >= 2
+        && matches!(value.as_bytes()[0], b'"' | b'\'' | b'`')
+        && value.as_bytes().first() == value.as_bytes().last()
+}
+
+fn is_reference(value: &str) -> bool {
+    static REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\{\{\s*(?:secrets|env|vars)(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*\}\}|\$[A-Za-z_][A-Za-z0-9_]*|process\.env\.[A-Za-z_][A-Za-z0-9_]*|var\.[A-Za-z_][A-Za-z0-9_]*|os\.(?:environ\[.*\]|(?:getenv|environ\.get)\([^,]*\)))$"#,
+        )
+        .unwrap()
+    });
+    REFERENCE.is_match(value)
+}
+
+fn shell_default_range(line: &str, range: &Range<usize>) -> Option<Range<usize>> {
+    static DEFAULT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|:=|-|=)(?P<default>[^{}]*)\}$").unwrap()
+    });
+    let captures = DEFAULT.captures(&line[range.clone()])?;
+    let value = captures.name("default")?;
+    Some(range.start + value.start()..range.start + value.end())
+}
+
+fn inside_shell_parameter(prefix: &str) -> bool {
+    let name_length = prefix
+        .bytes()
+        .rev()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    prefix[..prefix.len() - name_length].ends_with("${")
+}
+
+fn credential_key_boundary(line: &str, start: usize, key: &str) -> bool {
+    match line[..start].chars().next_back() {
+        None => true,
+        // Underscores/hyphens delimit credential suffixes in environment names.
+        Some(previous) if !previous.is_alphanumeric() => true,
+        // Camel-case suffixes such as clientSecret and databasePassword are
+        // credential names; arbitrary substrings such as notpassword are not.
+        Some(previous) => {
+            previous.is_ascii_lowercase()
+                && key.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        }
+    }
+}
+
+fn source_requires_quoted_values(path: &Path) -> bool {
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    [
+        "js", "mjs", "cjs", "ts", "jsx", "tsx", "rs", "py", "rb", "php", "java", "go", "cs", "c",
+        "cpp", "h", "hpp", "kt", "swift",
+    ]
+    .iter()
+    .any(|expected| extension.eq_ignore_ascii_case(expected))
+}
+
+fn is_placeholder(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "your_password_here"
+            | "your_api_key_here"
+            | "your_secret_here"
+            | "your_token_here"
+            | "your_github_token_here"
+            | "<password>"
+            | "<api_key>"
+            | "<secret>"
+            | "<token>"
+    )
+}
+
+fn is_publishable_key(value: &str) -> bool {
+    value
+        .strip_prefix("pk_live_")
+        .or_else(|| value.strip_prefix("pk_test_"))
+        .is_some_and(|suffix| {
+            suffix.len() >= 24 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+fn is_checksum_context(prefix: &str) -> bool {
+    // Inspect the adjacent assignment, not the entire prefix for every string
+    // in a minified bundle. Only remove one optional opening/closing quote.
+    let prefix = prefix
+        .strip_suffix(['"', '\'', '`'])
+        .unwrap_or(prefix)
+        .trim_end();
+    let Some(prefix) = prefix.strip_suffix([':', '=']) else {
+        return false;
+    };
+    let prefix = prefix.trim_end();
+    let prefix = prefix.strip_suffix(['"', '\'', '`']).unwrap_or(prefix);
+    let name_length = prefix
+        .bytes()
+        .rev()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    let name = &prefix[prefix.len() - name_length..];
+    [
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+        "md5",
+        "checksum",
+        "digest",
+        "integrity",
+    ]
+    .iter()
+    .any(|expected| name.eq_ignore_ascii_case(expected))
+}
+
+fn token_boundary(line: &str, range: &Range<usize>) -> bool {
+    let token_character = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    !line[..range.start]
+        .chars()
+        .next_back()
+        .is_some_and(token_character)
+        && !line[range.end..]
+            .chars()
+            .next()
+            .is_some_and(token_character)
+}
+
+fn valid_builtin(name: &str, line: &str, range: &Range<usize>, quoted: bool, path: &Path) -> bool {
+    let value = &line[range.clone()];
+    if matches!(
+        name,
+        "GitHub Token" | "Stripe Secret Key" | "npm Access Token" | "AWS Access Key" | "JWT Token"
+    ) {
+        return token_boundary(line, range);
+    }
+    if name == "Private Key" {
+        return true;
+    }
+    if name == "Database Connection String" {
+        let Some((_, authority)) = value.split_once("://") else {
+            return false;
+        };
+        let Some((userinfo, _)) = authority.split_once('@') else {
+            return false;
+        };
+        let Some((_, password)) = userinfo.split_once(':') else {
+            return false;
+        };
+        return !is_reference(password) && !is_placeholder(password);
+    }
+    if is_reference(value) || is_placeholder(value) || is_publishable_key(value) {
+        return false;
+    }
+    // In programming languages, unquoted assignment values are expressions,
+    // symbols or scalars, not string credentials. Environment/configuration
+    // files deliberately retain support for unquoted literal values. Provider
+    // formats above remain detectable anywhere, independently of assignments.
+    if !quoted && source_requires_quoted_values(path) {
+        return false;
+    }
+    // Unquoted program expressions are references, not string literals. Quoted
+    // passphrases and hardcoded values combined with interpolation still count.
+    if !quoted
+        && (value.contains(['(', '[', '{'])
+            || [
+                "process.env.",
+                "config.",
+                "settings.",
+                "secrets.",
+                "this.",
+                "self.",
+            ]
+            .iter()
+            .any(|prefix| value.starts_with(prefix)))
+    {
+        return false;
+    }
+    let aws_secret = || {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'+' | b'='))
+    };
+    match name {
+        "AWS Secret Key"
+        | "AWS Secret in Object"
+        | "AWS Direct Secret Assignment"
+        | "AWS Secret with Fallback" => aws_secret(),
+        "AWS Key in Object" | "AWS Direct Key Assignment" | "AWS Access Key with Fallback" => {
+            value.len() == 20
+                && (value.starts_with("AKIA") || value.starts_with("ASIA"))
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        }
+        "Generic API Key" => {
+            value.len() >= 32
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'-' | b'+' | b'/' | b'=' | b'.')
+                })
+                && value
+                    .bytes()
+                    .any(|byte| Some(&byte) != value.as_bytes().first())
+        }
+        "Netrc Password" => {
+            path.file_name().is_some_and(|file| file == ".netrc") && !value.is_empty()
+        }
+        _ => value.len() >= 8,
+    }
+}
+
 fn extract_entropy_candidates(line: &str, min_length: usize) -> Vec<Range<usize>> {
     let mut candidates = Vec::new();
-    for quote in ['"', '\''] {
+    for quote in ['"', '\'', '`'] {
         let mut offset = 0;
         while let Some(open) = line[offset..].find(quote).map(|index| offset + index) {
             let value_start = open + quote.len_utf8();
-            let Some(close) = line[value_start..]
-                .find(quote)
-                .map(|index| value_start + index)
-            else {
+            let mut close = value_start;
+            while close < line.len() {
+                match line.as_bytes()[close] {
+                    b'\\' => close += 2,
+                    byte if byte == quote as u8 => break,
+                    _ => close += 1,
+                }
+            }
+            if close >= line.len() {
                 break;
-            };
+            }
             if is_entropy_token(&line[value_start..close], min_length) {
                 candidates.push(value_start..close);
             }
