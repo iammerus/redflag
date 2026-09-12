@@ -12,9 +12,28 @@ import tempfile
 import urllib.request
 import zipfile
 
+MAX_BINARY = 256 * 1024 * 1024
+MAX_ARCHIVE = 128 * 1024 * 1024
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def matches_binary(path, expected):
+    if not path.is_file() or path.stat().st_size > MAX_BINARY:
+        return False
+    checksum = hashlib.sha256()
+    total = 0
+    with path.open('rb') as source:
+        while True:
+            data = source.read(min(1024 * 1024, MAX_BINARY - total + 1))
+            if not data:
+                return checksum.hexdigest() == expected
+            total += len(data)
+            if total > MAX_BINARY:
+                return False
+            checksum.update(data)
 
 
 def install(directory, archive_path=None):
@@ -27,25 +46,32 @@ def install(directory, archive_path=None):
     name = 'betterleaks.exe' if system == 'windows' else 'betterleaks'
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / name
-    if destination.is_file() and digest(destination.read_bytes()) == asset['binary_sha256']:
+    if matches_binary(destination, asset['binary_sha256']):
         destination.chmod(0o755)
         return destination
     if archive_path:
-        if archive_path.stat().st_size > 128 * 1024 * 1024:
+        if archive_path.stat().st_size > MAX_ARCHIVE:
             raise ValueError('Betterleaks archive exceeds the 128 MiB size limit')
-        data = archive_path.read_bytes()
+        with archive_path.open('rb') as source:
+            data = source.read(MAX_ARCHIVE + 1)
     else:
         with urllib.request.urlopen(asset['url'], timeout=60) as response:
-            data = response.read(128 * 1024 * 1024 + 1)
+            data = response.read(MAX_ARCHIVE + 1)
+    if len(data) > MAX_ARCHIVE:
+        raise ValueError('Betterleaks archive exceeds the 128 MiB size limit')
     if digest(data) != asset['archive_sha256']:
         raise ValueError('Betterleaks archive checksum does not match the reviewed pin')
     # Read only a known member; never extract archive paths onto the filesystem.
     if asset['archive'].endswith('.zip'):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            binary = archive.read(name)
+            with archive.open(name) as member:
+                binary = member.read(MAX_BINARY + 1)
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
-            binary = archive.extractfile(name).read()
+            with archive.extractfile(name) as member:
+                binary = member.read(MAX_BINARY + 1)
+    if len(binary) > MAX_BINARY:
+        raise ValueError('Betterleaks binary exceeds the 256 MiB size limit')
     if digest(binary) != asset['binary_sha256']:
         raise ValueError('Betterleaks binary checksum does not match the reviewed pin')
     temporary = None

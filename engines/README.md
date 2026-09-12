@@ -16,6 +16,9 @@ python3 scripts/install_engine.py --directory target/debug/engines
 Use `--archive PATH` for offline installation from a downloaded archive. The
 installer reads only the expected executable member and replaces it atomically.
 It does not extract arbitrary paths. Scanning never installs or updates engines.
+Existing executables are hashed in 1 MiB chunks. Cached files and archive member
+reads have a 256 MiB executable limit, including growth after the initial size
+check; the archive download limit remains 128 MiB.
 Redistributions must include `LICENSE.betterleaks`.
 
 `betterleaks.toml` inherits the pinned engine's rules while disabling its global
