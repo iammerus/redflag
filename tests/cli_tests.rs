@@ -366,7 +366,7 @@ fn repeated_exclusions_preserve_the_last_policy() {
         let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(findings.as_array().unwrap().len(), expected as usize);
         if expected == 1 {
-            assert_eq!(findings[0]["file"], target.to_str().unwrap());
+            assert_eq!(Path::new(findings[0]["file"].as_str().unwrap()), target);
         }
     }
 }
@@ -946,7 +946,7 @@ fn default_exclusions_keep_secret_bearing_configuration() {
     ] {
         assert!(findings
             .iter()
-            .any(|finding| finding["file"].as_str().unwrap().ends_with(path)));
+            .any(|finding| Path::new(finding["file"].as_str().unwrap()).ends_with(path)));
     }
     assert!(!findings.iter().any(|finding| {
         finding["file"]
@@ -1085,10 +1085,10 @@ policy = "ScanButAllow"
     let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
 
     assert_eq!(findings.len(), 1);
-    assert!(findings[0]["file"]
-        .as_str()
-        .unwrap()
-        .contains("private/allowed/secret.rs"));
+    assert_eq!(
+        Path::new(findings[0]["file"].as_str().unwrap()),
+        dir.path().join("private/allowed/secret.rs")
+    );
 }
 
 #[test]
