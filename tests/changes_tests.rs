@@ -456,6 +456,12 @@ fn introduced_commits_retain_deleted_and_reintroduced_secrets() {
 #[test]
 fn github_source_annotations_require_matching_checked_blobs_and_worktree_bytes() {
     let repo = Repo::new();
+    // This case requires checkout bytes to match the committed blob exactly.
+    repo.git
+        .config()
+        .unwrap()
+        .set_bool("core.autocrlf", false)
+        .unwrap();
     let base = repo.commit(&[], &[]);
     let value = format!("// synthetic fixture\n{}\n", token());
     let add = repo.commit(
@@ -514,6 +520,33 @@ fn github_source_annotations_require_matching_checked_blobs_and_worktree_bytes()
     let nested = run(repo.dir.path().parent().unwrap());
     assert_eq!(nested.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&nested.stdout).contains(",file="));
+    // A CRLF checkout must retain general annotations without attaching the
+    // committed byte coordinates to a differently encoded working file.
+    repo.git
+        .config()
+        .unwrap()
+        .set_bool("core.autocrlf", true)
+        .unwrap();
+    fs::remove_file(repo.dir.path().join("kept.rs")).unwrap();
+    repo.git
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    assert_eq!(
+        fs::read(repo.dir.path().join("kept.rs")).unwrap(),
+        value.replace('\n', "\r\n").as_bytes()
+    );
+    let converted = run(repo.dir.path());
+    assert_eq!(converted.status.code(), Some(1));
+    let converted = String::from_utf8(converted.stdout).unwrap();
+    assert_eq!(
+        converted
+            .lines()
+            .filter(|s| s.starts_with("::error "))
+            .count(),
+        2
+    );
+    assert!(!converted.contains(",file="));
+
     fs::write(
         repo.dir.path().join("kept.rs"),
         format!("// moved\n{value}"),
